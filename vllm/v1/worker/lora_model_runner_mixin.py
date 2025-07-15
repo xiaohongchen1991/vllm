@@ -68,20 +68,24 @@ class LoRAModelRunnerMixin:
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
     def set_active_loras(self, input_batch: InputBatch,
-                         num_scheduled_tokens: np.ndarray) -> None:
+                         num_scheduled_tokens: np.ndarray,
+                         num_sampled_tokens: np.ndarray) -> None:
 
-        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        prompt_lora_mapping: tuple[int,
+                                   ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int,
                                   ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = \
-                            input_batch.make_lora_inputs(num_scheduled_tokens)
+                            input_batch.make_lora_inputs(num_scheduled_tokens,
+                                                         num_sampled_tokens)
         return self._set_active_loras(prompt_lora_mapping, token_lora_mapping,
                                       lora_requests)
 
     @contextmanager
     def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
+                                  num_scheduled_tokens: np.ndarray,
+                                  num_sampled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:
@@ -95,6 +99,10 @@ class LoRAModelRunnerMixin:
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
             prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) %
                                    num_loras) + 1
+
+            # Make sample lora mapping
+            sample_lora_mapping = np.repeat(prompt_lora_mapping,
+                                            num_sampled_tokens)
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping,
@@ -115,7 +123,7 @@ class LoRAModelRunnerMixin:
                     self.lora_manager.add_dummy_lora(
                         lr, rank=self.LORA_WARMUP_RANK)
 
-                self._set_active_loras(tuple(prompt_lora_mapping),
+                self._set_active_loras(tuple(sample_lora_mapping),
                                        tuple(token_lora_mapping),
                                        lora_requests)
 
