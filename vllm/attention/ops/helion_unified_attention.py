@@ -20,10 +20,11 @@ def _triton_baseline_fn(
     # k_scale,
     # v_scale,
     t_query_start_lens,  # [num_seqs+1]
-    max_query_len,
+    # max_query_len,
     num_seqs,
 ):
     max_seqlen = t_seq_lens.max()
+    max_query_len = t_query_start_lens.diff().max()
     return triton_baseline_unified_attention(
         q=t_query,
         k=t_key_cache,
@@ -44,30 +45,51 @@ def _triton_baseline_fn(
     )
 
 
-nv_config = helion.Config(
-    block_sizes=[32, 4],
+nv_config_3d = helion.Config(
+    block_sizes=[16, 1, 32],
     indexing=[
         "pointer",
         "pointer",
         "pointer",
         "pointer",
-        "tensor_descriptor",
+        "pointer",
         "pointer",
         "tensor_descriptor",
         "pointer",
-        "tensor_descriptor",
     ],
-    l2_groupings=[2],
-    load_eviction_policies=["", "", "", "", "", "last", "last", ""],
-    loop_orders=[[1, 2, 0], [1, 0]],
-    num_stages=6,
-    num_warps=8,
-    pid_type="flat",
-    range_flattens=[None, True, True, True],
-    range_multi_buffers=[None, None, None, False],
-    range_num_stages=[],
-    range_unroll_factors=[0, 1, 2, 1],
-    range_warp_specializes=[],
+    l2_groupings=[32],
+    load_eviction_policies=["last", "last", "first", "last", "last", "last", "first"],
+    loop_orders=[[0, 1], [1, 0]],
+    num_stages=8,
+    num_warps=2,
+    pid_type="persistent_interleaved",
+    range_flattens=[True, False, False, True],
+    range_multi_buffers=[True, False, False, False],
+    range_unroll_factors=[2, 2, 1, 0],
+    range_warp_specializes=[False, None, False, True],
+)
+nv_config_2d = helion.Config(
+    block_sizes=[16, 16],
+    indexing=[
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "pointer",
+    ],
+    l2_groupings=[4],
+    load_eviction_policies=["first", "", "last", "last", "first", "last", "last"],
+    loop_orders=[[1, 0], [1, 0]],
+    num_stages=2,
+    num_warps=1,
+    pid_type="persistent_interleaved",
+    range_flattens=[True, None, True, False],
+    range_multi_buffers=[True, None, None, None],
+    range_unroll_factors=[3, 2, 2, 0],
+    range_warp_specializes=[None, False, False, True],
 )
 amd_config = helion.Config(
     block_sizes=[32, 8],
@@ -94,7 +116,7 @@ amd_config = helion.Config(
     range_warp_specializes=[],
 )
 
-config = nv_config if torch.version.cuda else amd_config
+config = nv_config_3d
 
 
 @helion.kernel(
@@ -102,13 +124,13 @@ config = nv_config if torch.version.cuda else amd_config
     # dot_precision='ieee',
     config=config,
     autotune_baseline_fn=_triton_baseline_fn,
-    # autotune_effort="quick",
+    autotune_effort="quick",
     static_shapes=False,
     print_output_code=False,
     print_repro=False,
     index_dtype=torch.int64,
 )
-def kernel_helion_v2_attention(
+def kernel_helion_attention(
     t_output,  # [num_tokens, num_query_heads, head_size]
     t_query,  # [num_tokens, num_query_heads, head_size]
     t_key_cache,  # [num_blks, blk_size, num_kv_heads, head_size]
@@ -119,7 +141,7 @@ def kernel_helion_v2_attention(
     # k_scale,
     # v_scale,
     t_query_start_lens,  # [num_seqs+1]
-    max_query_len,  # must be on cpu
+    # max_query_len,  # must be on cpu
     num_seqs,  # on cpu?
     # max_used_querylen_padded: hl.constexpr,
 ):
@@ -128,96 +150,95 @@ def kernel_helion_v2_attention(
     num_query_heads = hl.specialize(t_query.size(1))
     page_size = hl.specialize(t_value_cache.size(1))
     num_queries_per_kv = hl.specialize(num_query_heads // num_kv_heads)
-    # max_used_querylen_padded = hl.specialize(max_used_querylen_padded)
 
     assert page_size == t_key_cache.size(1)
     assert head_size == t_key_cache.size(3)
 
-    q_block_size = hl.register_block_size(4, int(max_query_len))
-    max_qblocks = (max_query_len + q_block_size - 1) // q_block_size
-    # q_block_size = hl.register_block_size(4, int(max_used_querylen_padded))
-    # max_qblocks = (max_used_querylen_padded + q_block_size -1) // q_block_size
+    t_key_cache = t_key_cache.flatten(start_dim=0, end_dim=1)
+    t_value_cache = t_value_cache.flatten(start_dim=0, end_dim=1)
 
-    for seq_idx, kv_head_idx, qblock_idx in hl.grid(
-        [num_seqs, num_kv_heads, max_qblocks]
-    ):
+    for seq_tile, kv_head_tile in hl.tile([num_seqs, num_kv_heads], block_size=[1, 1]):
+        seq_idx = seq_tile.begin
+        kv_head_idx = kv_head_tile.begin
         seq_len = t_seq_lens[seq_idx]
         query_start = t_query_start_lens[seq_idx]
         query_end = t_query_start_lens[seq_idx + 1]
         query_len = query_end - query_start
         context_len = seq_len - query_len
 
-        cur_qblock_start = query_start + qblock_idx * q_block_size
-        cur_qblock_end = torch.minimum(
-            query_start + (qblock_idx + 1) * q_block_size, query_end
-        )
+        head_start = kv_head_idx * num_queries_per_kv
+        head_end = (kv_head_idx + 1) * num_queries_per_kv
 
-        for tile_q, tile_m in hl.tile(
-            [cur_qblock_start, kv_head_idx * num_queries_per_kv],
-            [cur_qblock_end, (kv_head_idx + 1) * num_queries_per_kv],
-            block_size=[q_block_size, num_queries_per_kv],
+        for tile_q, tile_h in hl.tile(
+            [query_start, head_start],
+            [query_end, head_end],
         ):
-            block_m_size = tile_m.block_size * tile_q.block_size
+            # tile_m: tile_q x tile_h
+            block_m_size = tile_h.block_size * tile_q.block_size
+            query_pos = tile_q.index - query_start
+            query_pos = (
+                query_pos[:, None]
+                .expand(tile_q.block_size, tile_h.block_size)
+                .reshape(block_m_size)
+            )
 
-            # (tile_q, tile_m, HEAD_SIZE)
+            # (tile_q, tile_h, HEAD_SIZE)
             # # tile_q is masked here
-            q = t_query[tile_q, tile_m, :]
+            q = t_query[tile_q, tile_h, :]
             # (tile_m, HEAD_SIZE)
-            q = q.view([block_m_size, head_size])
+            q = q.flatten(start_dim=0, end_dim=1)
 
-            M = hl.full(
-                [block_m_size], float("-inf"), dtype=torch.float32
-            )  # device=q.device)
+            M = hl.full([block_m_size], float("-inf"), dtype=torch.float32)
             L = hl.full([block_m_size], 1.0, dtype=torch.float32)
-            acc = hl.zeros(
-                [block_m_size, head_size], dtype=torch.float32
-            )  # , device=q.device)
+            acc = hl.zeros([block_m_size, head_size], dtype=torch.float32)
 
             # adjust for causal mask
-            max_seq_prefix_len = (
-                context_len
-                + tile_q.end
-                + (tile_m.block_size + num_queries_per_kv - 1) // num_queries_per_kv
-            )
+            max_seq_prefix_len = context_len + tile_q.end - query_start
             max_seq_prefix_len = torch.minimum(max_seq_prefix_len, seq_len)
-            num_blocks = torch.ceil(max_seq_prefix_len / page_size)
-            for tile_n in hl.tile(num_blocks, block_size=None):
-                block_n_size = tile_n.block_size * page_size
-                blk_idxs = t_block_tables[seq_idx, tile_n].view([tile_n.block_size])
-                # (tile_n, PAGE_SIZE, 1, HEAD_SIZE)
-                k = t_key_cache[blk_idxs, :, kv_head_idx, :]
-                # DEBUG: to assert shape
-                # k = k.view([tile_n, page_size, head_size])
-                # (tile_n, PAGE_SIZE, HEAD_SIZE)
-                v = t_value_cache[blk_idxs, :, kv_head_idx, :]
+
+            for tile_n in hl.tile(max_seq_prefix_len):
+                block_n_size = tile_n.block_size
+                key_idx = tile_n.index
+                page_idx = key_idx // page_size  # [block_n_size]
+                page_offset = key_idx % page_size  # [block_n_size]
+                blk_idx = (
+                    t_block_tables[seq_idx, page_idx]
+                    .view([block_n_size])
+                    .to(torch.int64)
+                )  # [block_n_size]
+                cache_idx = blk_idx * page_size + page_offset
+                # (tile_n, HEAD_SIZE)
+                k = t_key_cache[cache_idx, kv_head_idx, :]
+                v = t_value_cache[cache_idx, kv_head_idx, :]
                 # (HEAD_SIZE, tile_n)
-                k = k.view([block_n_size, head_size]).transpose(0, 1)
+                k = k.transpose(0, 1)
                 # (tile_m, tile_n)
-                qk = torch.mm(q, k) * scale
-                # DEBUG: to check the shape...
-                # qk = qk.view([block_m_size, block_n_size])
-                # (tile_m)
-                M_j = torch.maximum(M, torch.amax(qk, 1))
+                S = hl.zeros([block_m_size, block_n_size], dtype=torch.float32)
+                S = scale * hl.dot(q, k, out_dtype=torch.float32, acc=S)
+
+                # causal mask
+                causal_mask = key_idx[None, :] < context_len + query_pos[:, None] + 1
+                S = torch.where(causal_mask, S, float("-inf"))
+
+                M_j = torch.maximum(M, torch.amax(S, 1))
                 # (tile_m, tile_n)
-                P = torch.exp(qk - M_j[:, None])
+                P = torch.exp(S - M_j[:, None])
                 # (tile_m, )
                 L_j = torch.sum(P, 1)
                 # (tile_m, )
                 alpha = torch.exp(M - M_j)
                 # (tile_m, HEAD_SIZE)
-                acc *= alpha[:, None]
-                L *= alpha + L_j
+                acc = acc * alpha[:, None]
+                L = L * alpha + L_j
                 M = M_j
 
-                # (tile_n, HEAD_SIZE)
-                v_view = v.view([block_n_size, head_size])
                 # (tile_m, HEAD_SIZE)
-                acc += torch.mm(P.to(v.dtype), v_view)
+                acc = hl.dot(P.to(v.dtype), v, out_dtype=torch.float32, acc=acc)
 
             # epilogue
             acc = acc / L[:, None]
-            t_output[tile_q, tile_m, :] = acc.view(
-                [tile_q.block_size, tile_m.block_size, head_size]
+            t_output[tile_q, tile_h, :] = acc.view(
+                [tile_q.block_size, tile_h.block_size, head_size]
             )
 
 
@@ -234,7 +255,7 @@ def helion_unified_attention(
     causal,
     window_size,
     block_table,
-    max_query_len_int: int,
+    # max_query_len_int: int,
     num_seqs: int,
     softcap,
     q_descale,
@@ -260,7 +281,7 @@ def helion_unified_attention(
     #   else torch._inductor.runtime.runtime_utils.next_power_of_2(
     #     max(16, max_query_len_int))
 
-    kernel_helion_v2_attention(
+    kernel_helion_attention(
         t_output=out,
         t_query=q,
         t_key_cache=k,
@@ -271,7 +292,7 @@ def helion_unified_attention(
         # k_scale=k_descale,
         # v_scale=v_descale,
         t_query_start_lens=cu_seqlens_q,
-        max_query_len=max_query_len_int,  # need not to be a tensor
+        # max_query_len=max_query_len_int,  # need not to be a tensor
         # max_used_querylen_padded = int(max_used_querylen_padded),
         num_seqs=num_seqs,
     )
