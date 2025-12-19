@@ -78,7 +78,8 @@ def ref_paged_attn(
 
 
 @pytest.mark.parametrize(
-    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+    "seq_lens",
+    [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)], [(1, 5)]],
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)

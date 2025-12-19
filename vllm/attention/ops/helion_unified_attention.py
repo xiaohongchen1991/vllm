@@ -46,7 +46,7 @@ def _triton_baseline_fn(
 
 
 nv_config_3d = helion.Config(
-    block_sizes=[16, 1, 32],
+    block_sizes=[16, 1, 16],
     indexing=[
         "pointer",
         "pointer",
@@ -68,6 +68,31 @@ nv_config_3d = helion.Config(
     range_unroll_factors=[2, 2, 1, 0],
     range_warp_specializes=[False, None, False, True],
 )
+
+nv_config_3d_size_1 = helion.Config(
+    block_sizes=[1, 1, 16],
+    indexing=[
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "pointer",
+    ],
+    l2_groupings=[32],
+    load_eviction_policies=["last", "last", "first", "last", "last", "last", "first"],
+    loop_orders=[[0, 1], [1, 0]],
+    num_stages=8,
+    num_warps=2,
+    pid_type="persistent_interleaved",
+    range_flattens=[True, False, False, True],
+    range_multi_buffers=[True, False, False, False],
+    range_unroll_factors=[2, 2, 1, 0],
+    range_warp_specializes=[False, None, False, True],
+)
+
 nv_config_2d = helion.Config(
     block_sizes=[16, 16],
     indexing=[
@@ -122,9 +147,9 @@ config = nv_config_3d
 @helion.kernel(
     allow_warp_specialize=True,
     # dot_precision='ieee',
-    config=config,
-    autotune_baseline_fn=_triton_baseline_fn,
-    autotune_effort="quick",
+    # config=config,
+    # autotune_baseline_fn=_triton_baseline_fn,
+    autotune_effort="none",
     static_shapes=False,
     print_output_code=False,
     print_repro=False,
@@ -176,17 +201,13 @@ def kernel_helion_attention(
             # tile_m: tile_q x tile_h
             block_m_size = tile_h.block_size * tile_q.block_size
             query_pos = tile_q.index - query_start
-            query_pos = (
-                query_pos[:, None]
-                .expand(tile_q.block_size, tile_h.block_size)
-                .reshape(block_m_size)
-            )
+            query_pos = query_pos.repeat_interleave(tile_h.block_size)
 
             # (tile_q, tile_h, HEAD_SIZE)
             # # tile_q is masked here
             q = t_query[tile_q, tile_h, :]
             # (tile_m, HEAD_SIZE)
-            q = q.flatten(start_dim=0, end_dim=1)
+            q = q.reshape([block_m_size, head_size])
 
             M = hl.full([block_m_size], float("-inf"), dtype=torch.float32)
             L = hl.full([block_m_size], 1.0, dtype=torch.float32)
@@ -281,7 +302,8 @@ def helion_unified_attention(
     #   else torch._inductor.runtime.runtime_utils.next_power_of_2(
     #     max(16, max_query_len_int))
 
-    kernel_helion_attention(
+    config = nv_config_3d_size_1 if q.size(0) == 1 else nv_config_3d
+    args = kernel_helion_attention.normalize_args(
         t_output=out,
         t_query=q,
         t_key_cache=k,
@@ -296,3 +318,5 @@ def helion_unified_attention(
         # max_used_querylen_padded = int(max_used_querylen_padded),
         num_seqs=num_seqs,
     )
+    compiled_kernel = kernel_helion_attention.bind(args).compile_config(config)
+    compiled_kernel(*args)
