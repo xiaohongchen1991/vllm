@@ -185,8 +185,9 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
-        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
-        DeepGemmFp8BlockScaledMMKernel,
+        # Enforce vllm to use Cutlass for blockwise scaled_mm
+        # FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        # DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],

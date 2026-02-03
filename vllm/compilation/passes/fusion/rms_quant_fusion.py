@@ -32,6 +32,9 @@ from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
 )
+from vllm.kernels.helion.ops.rms_norm_dynamic_per_token_quant import (
+    rms_norm_dynamic_per_token_quant,
+)
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -80,7 +83,8 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops.vllm_helion.per_token_group_fp8_quant.default  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 
@@ -108,18 +112,30 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8StaticTensorSym, True
     ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, False
+    # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, True
+    # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, False
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic128Sym, False
+    # ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic128Sym, True
+    # ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, False
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
@@ -244,7 +260,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(
@@ -346,7 +362,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
 
@@ -441,7 +457,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(
@@ -562,7 +578,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
@@ -654,7 +670,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.info("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> str:
         return self.hash_source(

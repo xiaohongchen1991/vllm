@@ -102,7 +102,14 @@ class FixFunctionalizationPass(VllmInductorPass):
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
                 mutated_args = {1: "result", 2: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
-            elif at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default:  # noqa: E501
+            elif at_target == torch.ops._C.rms_norm_per_block_quant.default:
+                mutated_args = {1: "result", 2: "scale", 3: "residual"}
+                self.defunctionalize(graph, node, mutated_args)
+            elif (
+                at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default
+                or at_target
+                == torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default
+            ):  # noqa: E501
                 mutated_args = {1: "result", 2: "scale", 3: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
@@ -137,6 +144,16 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.defunctionalize(
                     graph, node, mutated_args, args=("result", "input", "scale")
                 )
+            elif at_target == torch.ops.vllm_helion.silu_and_mul_dynamic_per_token_quant.default:
+                mutated_args = {1: "result", 2: "input", 3: "scale"}
+                self.defunctionalize(
+                    graph, node, mutated_args, args=("result", "input", "scale", "scale_ub")
+                )
+            elif at_target == torch.ops.vllm_helion.silu_and_mul_per_block_quant.default:
+                mutated_args = {1: "out", 2: "scales"}
+                self.defunctionalize(
+                    graph, node, mutated_args, args=("out", "input", "scales", "group_size", "scale_ub", "is_scale_transposed")
+                )
             elif (
                 hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant")
                 and at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default
@@ -154,7 +171,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                     ),
                 )
             # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
-            elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+            elif at_target == torch.ops._C.fused_qk_norm_rope.default or at_target == torch.ops.vllm_helion.fused_qk_norm_rope.default:
                 mutated_args = {1: "qkv"}
                 args = (
                     "qkv",

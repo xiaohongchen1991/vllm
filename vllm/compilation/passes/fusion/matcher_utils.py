@@ -25,6 +25,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import (
+    dynamic_per_token_scaled_fp8_quant,
+)
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 ROTARY_OP = torch.ops._C.rotary_embedding.default
@@ -33,14 +36,16 @@ FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    # kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTokenSym: torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out  # noqa: E501
 
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops.vllm_helion.per_token_group_fp8_quant.default  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
@@ -179,7 +184,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
             self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_fused_add_op()
 
     def inputs(self) -> list[torch.Tensor]:
-        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
+        input = self.empty(5, 16)
         weight = self.empty(16)
         residual = self.empty(5, 16)
         return [input, weight, residual]

@@ -4,6 +4,7 @@
 from typing import TYPE_CHECKING, Literal
 
 import torch
+import os
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -902,8 +903,11 @@ def cutlass_scaled_mm(
 
         out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     else:
-        out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        if os.getenv("USE_HELION_SCALED_MM"):
+            out = torch.ops.vllm_helion.scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+        else:
+            out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+            torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out.view(*target_shape)
 
@@ -1906,7 +1910,10 @@ def scaled_fp8_quant(
     if scale is None:
         if use_per_token_if_dynamic:
             scale = torch.empty((shape[0], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+            # torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+            #     output, input, scale, scale_ub
+            # )
+            torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant(
                 output, input, scale, scale_ub
             )
         else:
