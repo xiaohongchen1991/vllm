@@ -1,0 +1,43 @@
+{
+  "block_sizes": [
+    1,
+    8192,
+    2048
+  ],
+  "range_unroll_factors": [
+    0,
+    1,
+    2
+  ],
+  "range_warp_specializes": [
+    null,
+    false,
+    null
+  ],
+  "range_multi_buffers": [
+    null,
+    null,
+    true
+  ],
+  "range_flattens": [
+    null,
+    null,
+    false
+  ],
+  "load_eviction_policies": [
+    "last",
+    "last",
+    "first"
+  ],
+  "num_warps": 8,
+  "num_stages": 8,
+  "indexing": [
+    "pointer",
+    "pointer",
+    "pointer",
+    "pointer",
+    "pointer"
+  ],
+  "pid_type": "flat",
+  "range_num_stages": []
+}
