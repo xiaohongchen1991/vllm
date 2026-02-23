@@ -1,0 +1,57 @@
+{
+  "block_sizes": [
+    1,
+    16,
+    1,
+    1
+  ],
+  "loop_orders": [
+    [
+      0,
+      1,
+      2,
+      3
+    ]
+  ],
+  "l2_groupings": [
+    2
+  ],
+  "range_unroll_factors": [
+    3
+  ],
+  "range_warp_specializes": [
+    false
+  ],
+  "range_multi_buffers": [
+    null
+  ],
+  "range_flattens": [
+    false
+  ],
+  "load_eviction_policies": [
+    "last",
+    "",
+    "first",
+    "first",
+    "first",
+    "",
+    "first",
+    ""
+  ],
+  "num_warps": 4,
+  "num_stages": 4,
+  "indexing": [
+    "pointer",
+    "tensor_descriptor",
+    "tensor_descriptor",
+    "tensor_descriptor",
+    "tensor_descriptor",
+    "pointer",
+    "pointer",
+    "pointer",
+    "tensor_descriptor"
+  ],
+  "pid_type": "persistent_interleaved",
+  "num_sm_multiplier": 2,
+  "maxnreg": 32
+}
