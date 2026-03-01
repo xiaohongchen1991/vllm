@@ -768,8 +768,9 @@ def cutlass_scaled_mm(
 
         out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     else:
-        out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        # out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+        # torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        out = torch.ops.vllm_helion.scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     return out.view(*target_shape)
 

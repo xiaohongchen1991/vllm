@@ -349,6 +349,83 @@ def baseline(
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
     return out
 
+def key_fn(
+    a: torch.Tensor,  # [M, K]
+    b: torch.Tensor,  # [K, N]
+    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,  # [N]
+):
+    try:
+        hash(a.shape)
+        hash(b.shape)
+        M, K = a.shape
+        N = b.shape[1]
+        print("input shape: ", M, K, N)
+        return (helion.next_power_of_2(M), helion.next_power_of_2(K), helion.next_power_of_2(N))
+    except:
+        return (0, 0, 0)
+
+_REGISTERED = False
+def register_kernel() -> None:
+    global _REGISTERED
+    if _REGISTERED:
+        return
+
+    fn = scaled_mm
+    fn.configs = [
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_8_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_16_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_32_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_64_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_128_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_256_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_512_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1024_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_8_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_16_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_32_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_64_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_128_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_256_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_512_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1024_hidden_size_4096.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_8_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_16_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_32_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_64_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_128_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_256_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_512_hidden_size_8192.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1024_hidden_size_8192.json"))),
+    ]
+    fn._key_fn = key_fn
+
+    def fake_impl(*args, **kwargs):
+        bound = fn.bind(args)
+        default_config = bound.config_spec.default_config()
+        compiled = bound.compile_config(default_config)
+        return compiled(*args, **kwargs, _launcher=lambda *a, **kw: None)
+
+    direct_register_custom_op(
+        op_name="scaled_mm",
+        op_func=fn,
+        mutates_args=None,
+        fake_impl=fake_impl,
+        target_lib=vllm_helion_lib,
+    )
+    _REGISTERED = True
+    print("successfully registered scaled_mm")
 
 if __name__ == "__main__":
     # autotune(scaled_mm)
