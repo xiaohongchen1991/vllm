@@ -76,6 +76,8 @@ else:
         else:
             raise AttributeError(f"module {__package__} has no attribute {name}")
 
+from vllm.kernels.helion.rms_norm_dynamic_per_token_quant import register_kernel
+register_kernel()
 
 __all__ = [
     "__version__",

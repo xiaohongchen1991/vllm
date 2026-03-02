@@ -41,7 +41,7 @@ def _get_int8_min_scaling_factor() -> float:
     ignore_warnings=[helion.exc.TensorOperationInWrapper],
 )
 def rms_norm_dynamic_per_token_quant_v1(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     weight: torch.Tensor,  # [num_tokens]
     scale: torch.Tensor,  # [num_tokens, 1]
@@ -56,11 +56,11 @@ def rms_norm_dynamic_per_token_quant_v1(
 
     # only support fp8 quant for now
     fp8_dtype = _get_fp8_dtype()
-    assert output.dtype in [fp8_dtype, torch.int8]
-    assert output.is_contiguous() and input.is_contiguous()
+    assert result.dtype in [fp8_dtype, torch.int8]
+    assert result.is_contiguous() and input.is_contiguous()
 
     if scale_ub is not None:
-        assert output.dtype == fp8_dtype
+        assert result.dtype == fp8_dtype
         assert scale_ub.dtype == torch.float32
 
     assert input.dtype == weight.dtype
@@ -70,7 +70,7 @@ def rms_norm_dynamic_per_token_quant_v1(
     if residual is not None:
         residual.dtype == input.dtype
 
-    quant_dtype = output.dtype
+    quant_dtype = result.dtype
     if quant_dtype == torch.int8:
         qtype_traits_min, qtype_traits_max = _get_int8_min_max()
         min_scaling_factor = _get_int8_min_scaling_factor()
@@ -119,8 +119,8 @@ def rms_norm_dynamic_per_token_quant_v1(
             else:
                 y_blk = x_blk / s_blk[:, None]
 
-            output[tile_m, tile_n] = y_blk.clamp(qtype_traits_min, qtype_traits_max).to(
-                output.dtype
+            result[tile_m, tile_n] = y_blk.clamp(qtype_traits_min, qtype_traits_max).to(
+                result.dtype
             )
 
 
@@ -134,7 +134,7 @@ def rms_norm_dynamic_per_token_quant_v1(
     ignore_warnings=[helion.exc.TensorOperationInWrapper],
 )
 def rms_norm_dynamic_per_token_quant_v2(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     weight: torch.Tensor,  # [num_tokens]
     scale: torch.Tensor,  # [num_tokens, 1]
@@ -149,11 +149,11 @@ def rms_norm_dynamic_per_token_quant_v2(
 
     # only support fp8 quant for now
     fp8_dtype = _get_fp8_dtype()
-    assert output.dtype in [fp8_dtype, torch.int8]
-    assert output.is_contiguous() and input.is_contiguous()
+    assert result.dtype in [fp8_dtype, torch.int8]
+    assert result.is_contiguous() and input.is_contiguous()
 
     if scale_ub is not None:
-        assert output.dtype == fp8_dtype
+        assert result.dtype == fp8_dtype
         assert scale_ub.dtype == torch.float32
 
     assert input.dtype == weight.dtype
@@ -163,7 +163,7 @@ def rms_norm_dynamic_per_token_quant_v2(
     if residual is not None:
         residual.dtype == input.dtype
 
-    quant_dtype = output.dtype
+    quant_dtype = result.dtype
     if quant_dtype == torch.int8:
         qtype_traits_min, qtype_traits_max = _get_int8_min_max()
         min_scaling_factor = _get_int8_min_scaling_factor()
@@ -212,8 +212,8 @@ def rms_norm_dynamic_per_token_quant_v2(
             else:
                 y_blk = x_blk / s_blk[:, None]
 
-            output[tile_m, tile_n] = y_blk.clamp(qtype_traits_min, qtype_traits_max).to(
-                output.dtype
+            result[tile_m, tile_n] = y_blk.clamp(qtype_traits_min, qtype_traits_max).to(
+                result.dtype
             )
 
 
@@ -473,6 +473,60 @@ def benchmark(fn, baseline, repeat=1000, cudagraph=True):
 
     print_table(rows)
 
+def key_fn(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [num_tokens]
+    scale: torch.Tensor,  # [num_tokens, 1]
+    epsilon: float,
+    scale_ub: torch.Tensor | None = None,  # []
+    residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
+):
+    try:
+        hash(input.shape)
+        # print("input shape: ", input.shape)
+        num_tokens, hidden_size = input.shape
+        return (helion.next_power_of_2(num_tokens), helion.next_power_of_2(hidden_size))
+    except:
+        return (0, 0)
+
+_REGISTERED = False
+def register_kernel() -> None:
+    global _REGISTERED
+    if _REGISTERED:
+        return
+
+    fn = rms_norm_dynamic_per_token_quant_v2
+    fn.configs = [
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_8_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_16_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_32_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_64_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_128_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_256_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_512_hidden_size_2048.json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1024_hidden_size_2048.json"))),
+    ]
+    fn._key_fn = key_fn
+
+    def fake_impl(*args, **kwargs):
+        bound = fn.bind(args)
+        default_config = bound.config_spec.default_config()
+        compiled = bound.compile_config(default_config)
+        return compiled(*args, **kwargs, _launcher=lambda *a, **kw: None)
+
+    direct_register_custom_op(
+        op_name="rms_norm_dynamic_per_token_quant",
+        op_func=fn,
+        mutates_args=["result", "scale", "residual"],
+        fake_impl=fake_impl,
+        target_lib=vllm_helion_lib,
+    )
+    _REGISTERED = True
+    print("successfully registered rms_norm_dynamic_per_token_quant")
 
 if __name__ == "__main__":
     # autotune(rms_norm_dynamic_per_token_quant_v2, True)
