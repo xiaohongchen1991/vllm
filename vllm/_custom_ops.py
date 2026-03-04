@@ -13,6 +13,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.kernels.helion.ops.scaled_mm import scaled_mm
 
 logger = init_logger(__name__)
 
@@ -766,8 +767,9 @@ def cutlass_scaled_mm(
 
         out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     else:
-        out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        # out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+        # torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        out = scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     return out.view(*target_shape)
 
