@@ -4,7 +4,7 @@
 import helion
 import helion.language as hl
 import torch
-
+from typing import Callable, Any, Optional, Sequence
 
 @helion.kernel(
     autotune_effort="none",
@@ -68,8 +68,9 @@ def static_scaled_fp8_quant(
     output: torch.Tensor,
     input: torch.Tensor,
     scale: torch.Tensor,
-    group_shape: tuple[int, int] | None = None,
-):
+    group_shape: Optional[Sequence[int]] = None,
+    fn: Callable[..., None] = static_scaled_fp8_quant_helion,
+) -> None:
     assert input.stride(-1) == 1
     assert output.stride(-1) == 1
 
@@ -81,7 +82,7 @@ def static_scaled_fp8_quant(
         group_n = hidden_size
         scale_2d = scale.reshape(1, 1)
     elif scale.dim() == 1:
-        assert group_shape is not None
+        assert group_shape is not None and len(group_shape) == 2
         group_shape_m, group_shape_n = group_shape
         assert group_shape_m == -1 or group_shape_n == -1
         group_m = num_tokens if group_shape_m == -1 else int(group_shape_m)
@@ -99,6 +100,7 @@ def static_scaled_fp8_quant(
         inferred_group_n = hidden_size // scale_size_1
 
         if group_shape is not None:
+            assert len(group_shape) == 2
             group_shape_m, group_shape_n = group_shape
             group_m = num_tokens if group_shape_m == -1 else int(group_shape_m)
             group_n = hidden_size if group_shape_n == -1 else int(group_shape_n)
@@ -106,7 +108,7 @@ def static_scaled_fp8_quant(
         else:
             group_m, group_n = inferred_group_m, inferred_group_n
 
-    static_scaled_fp8_quant_helion(output, input, scale_2d, group_m, group_n)
+    fn(output, input, scale_2d, group_m, group_n)
 
 
 from itertools import product
@@ -376,6 +378,78 @@ def benchmark(fn, baseline, repeat=1000, cudagraph=True):
 
     print_table(rows)
 
+def key_fn(
+    output: torch.Tensor,
+    input: torch.Tensor,
+    scale: torch.Tensor,
+    group_m: int,
+    group_n: int,
+):
+    try:
+        hash(input.shape)
+        print("input shape: ", input.shape)
+        num_tokens, hidden_size = input.shape
+        return (helion.next_power_of_2(num_tokens), helion.next_power_of_2(hidden_size))
+    except:
+        return (0, 0)
+
+_REGISTERED = False
+def register_kernel() -> None:
+    global _REGISTERED
+    if _REGISTERED:
+        return
+
+    fn = static_scaled_fp8_quant_helion
+    fn.configs = [
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_8_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_16_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_32_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_64_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_128_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_256_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_512_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1024_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2048_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4096_hidden_size_2048_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_8_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_16_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_32_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_64_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_128_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_256_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_512_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_1024_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_2048_hidden_size_8192_group_shape_(-1, -1).json"))),
+        helion.Config.load(str(Path(f"helion_configs/{fn.__name__}/num_tokens_4096_hidden_size_8192_group_shape_(-1, -1).json"))),
+    ]
+    fn._key_fn = key_fn
+
+    def fn_wrapper(
+        output: torch.Tensor,
+        input: torch.Tensor,
+        scale: torch.Tensor,
+        group_shape: Optional[Sequence[int]]
+    ) -> None:
+        return static_scaled_fp8_quant(output, input, scale, group_shape, fn)
+
+    def fake_impl(*args, **kwargs):
+        return
+
+    direct_register_custom_op(
+        op_name="static_scaled_fp8_quant",
+        op_func=fn_wrapper,
+        mutates_args=["output"],
+        fake_impl=fake_impl,
+        target_lib=vllm_helion_lib,
+    )
+    _REGISTERED = True
+    print("successfully static_scaled_fp8_quant")
 
 if __name__ == "__main__":
     # autotune(static_scaled_fp8_quant_helion, True)

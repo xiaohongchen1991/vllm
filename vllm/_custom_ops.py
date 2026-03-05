@@ -1808,7 +1808,8 @@ def scaled_fp8_quant(
             scale = torch.empty(1, device=input.device, dtype=torch.float32)
             torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
-        torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
+        # torch.ops._C.static_scaled_fp8_quant(output, input, scale, group_shape)
+        torch.ops.vllm_helion.static_scaled_fp8_quant(output, input, scale, group_shape)
 
     return output, scale
 
