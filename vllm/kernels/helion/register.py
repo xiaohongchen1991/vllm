@@ -394,7 +394,7 @@ class HelionKernelWrapper:
         direct_register_custom_op(
             op_name=self.op_name,
             op_func=configured_kernel._decorated_kernel,
-            mutates_args=["output", "scale"],
+            mutates_args=None,
             fake_impl=self._fake_impl,
             target_lib=vllm_helion_lib,
         )
