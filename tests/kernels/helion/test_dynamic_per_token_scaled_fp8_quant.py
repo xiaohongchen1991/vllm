@@ -12,7 +12,7 @@ from tests.kernels.quant_utils import (
     FP8_DTYPE,
     ref_dynamic_per_token_quant,
 )
-from vllm.kernels.helion.dynamic_per_token_scaled_fp8_quant import (
+from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import (
     dynamic_per_token_scaled_fp8_quant,
 )
 from vllm.platforms import current_platform

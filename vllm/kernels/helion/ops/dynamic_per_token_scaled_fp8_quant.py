@@ -65,7 +65,8 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     if not config_keys:
         return None
 
-    output, input, scale, scale_ub = args
+    _, input, *_ = args
+    print("input shape: ", input.shape)
     num_tokens, hidden_size = input.shape
 
     configs: dict[int, list[int]] = {}
@@ -92,14 +93,22 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
 
     return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
 
+def fake_impl(
+    output: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    scale: torch.Tensor,  # [num_tokens, 1]
+    scale_ub: torch.Tensor | None = None,  # scalar tensor
+) -> None:
+    return
 
 @register_kernel(
     config_picker=pick_config,
     input_generator=generate_inputs,
+    # fake_impl=fake_impl,
     helion_settings=helion.Settings(
-        allow_warp_specialize=True,
         autotune_ignore_errors=True,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
+        static_shapes=False,
     ),
 )  # type: ignore[misc]
 def dynamic_per_token_scaled_fp8_quant(

@@ -13,6 +13,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import dynamic_per_token_scaled_fp8_quant
 
 logger = init_logger(__name__)
 
@@ -1869,8 +1870,11 @@ def scaled_fp8_quant(
     if scale is None:
         if use_per_token_if_dynamic:
             scale = torch.empty((shape[0], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub
+            # torch.ops._C.dynamic_per_token_scaled_fp8_quant(
+            #     output, input, scale, scale_ub
+            # )
+            dynamic_per_token_scaled_fp8_quant(
+                 output, input, scale, scale_ub
             )
         else:
             scale = torch.empty(1, device=input.device, dtype=torch.float32)
