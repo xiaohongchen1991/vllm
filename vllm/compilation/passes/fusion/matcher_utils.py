@@ -34,7 +34,8 @@ FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    # kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTokenSym: torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):

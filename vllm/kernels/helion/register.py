@@ -254,6 +254,7 @@ class HelionKernelWrapper:
         op_name: str,
         fake_impl: Callable,
         config_picker: Callable[[tuple[Any, ...], list[str]], str | None],
+        mutates_args: list[str] | None = None,
         helion_settings: "helion.Settings | None" = None,
         input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None,
     ):
@@ -263,6 +264,7 @@ class HelionKernelWrapper:
         self.raw_kernel_func = raw_kernel_func
         self.op_name = op_name
         self._fake_impl = fake_impl
+        self._mutates_args = mutates_args
         self.helion_settings = helion_settings
         self._config_picker = config_picker
         self._input_generator = input_generator
@@ -394,7 +396,7 @@ class HelionKernelWrapper:
         direct_register_custom_op(
             op_name=self.op_name,
             op_func=configured_kernel._decorated_kernel,
-            mutates_args=["output", "scale"],
+            mutates_args=self._mutates_args,
             fake_impl=self._fake_impl,
             target_lib=vllm_helion_lib,
         )
@@ -438,6 +440,7 @@ def register_kernel(
     op_name: str | None = None,
     *,
     config_picker: Callable[[tuple[Any, ...], list[str]], str | None],
+    mutates_args: list[str] | None = None,
     fake_impl: Callable | None = None,
     helion_settings: "helion.Settings | None" = None,
     input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None,
@@ -498,6 +501,7 @@ def register_kernel(
         kernel_wrapper = HelionKernelWrapper(
             raw_kernel_func=kernel_func,
             op_name=final_op_name,
+            mutates_args=mutates_args,
             fake_impl=final_fake_impl,
             config_picker=config_picker,
             helion_settings=helion_settings,

@@ -9,7 +9,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from vllm.kernels.helion.rms_norm_dynamic_per_token_quant import (
+from vllm.kernels.helion.ops.rms_norm_dynamic_per_token_quant import (
     rms_norm_dynamic_per_token_quant,
 )
 from vllm.platforms import current_platform

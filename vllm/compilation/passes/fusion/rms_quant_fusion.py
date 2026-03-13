@@ -10,6 +10,9 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.kernels.helion.ops.rms_norm_dynamic_per_token_quant import (
+    rms_norm_dynamic_per_token_quant,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -60,7 +63,8 @@ RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    # kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTokenSym: torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default
@@ -93,12 +97,18 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8StaticTensorSym, True
     ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, False
+    # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, True
+    # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, False
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, False
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501

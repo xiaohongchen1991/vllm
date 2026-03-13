@@ -38,12 +38,12 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     inputs = {}
     for num_tokens, hidden_size in product(num_tokens_list, hidden_size_list):
         input = torch.randn(num_tokens, hidden_size, device="cuda", dtype=in_dtype)
-        output = torch.empty(input.shape, device=input.device, dtype=out_dtype)
+        result = torch.empty(input.shape, device=input.device, dtype=out_dtype)
         scale = torch.empty((num_tokens, 1), device=input.device, dtype=scale_dtype)
         scale_ub = torch.mean(input).to(scale_dtype)
 
         config_key = f"hidden_size_{hidden_size}_num_tokens_{num_tokens}"
-        inputs[config_key] = (output, input, scale, scale_ub)
+        inputs[config_key] = (result, input, scale, scale_ub)
 
     return inputs
 
@@ -66,7 +66,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
         return None
 
     _, input, *_ = args
-    print("input shape: ", input.shape)
     num_tokens, hidden_size = input.shape
 
     configs: dict[int, list[int]] = {}
@@ -93,18 +92,21 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
 
     return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
 
+
 def fake_impl(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     scale: torch.Tensor,  # [num_tokens, 1]
     scale_ub: torch.Tensor | None = None,  # scalar tensor
 ) -> None:
     return
 
+
 @register_kernel(
+    mutates_args=["result", "scale"],
     config_picker=pick_config,
     input_generator=generate_inputs,
-    # fake_impl=fake_impl,
+    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_ignore_errors=True,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
@@ -112,7 +114,7 @@ def fake_impl(
     ),
 )  # type: ignore[misc]
 def dynamic_per_token_scaled_fp8_quant(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     scale: torch.Tensor,  # [num_tokens, 1]
     scale_ub: torch.Tensor | None = None,  # scalar tensor
@@ -122,11 +124,11 @@ def dynamic_per_token_scaled_fp8_quant(
     num_tokens, hidden_size = input.shape
     hl.specialize(hidden_size)
 
-    assert output.shape == input.shape
+    assert result.shape == input.shape
     assert scale.shape[0] == num_tokens
     assert scale.dtype == torch.float32
     assert input.stride()[-1] == 1
-    assert output.stride()[-1] == 1
+    assert result.stride()[-1] == 1
 
     fp8_min, fp8_max = get_fp8_min_max()
     min_scaling_factor = 1.0 / (fp8_max * 512.0)
@@ -149,13 +151,13 @@ def dynamic_per_token_scaled_fp8_quant(
             x_blk = input[tile_m, tile_n].to(torch.float32)
             y_blk = x_blk * (1.0 / s_blk[:, None])
 
-            output[tile_m, tile_n] = y_blk.clamp(fp8_min, fp8_max).to(output.dtype)
+            result[tile_m, tile_n] = y_blk.clamp(fp8_min, fp8_max).to(result.dtype)
 
 
 def dynamic_per_token_scaled_fp8_baseline(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     scale: torch.Tensor,  # [num_tokens, 1]
     scale_ub: torch.Tensor | None = None,  # scalar tensor
 ) -> None:
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, input, scale, scale_ub)
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant(result, input, scale, scale_ub)

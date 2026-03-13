@@ -1873,7 +1873,7 @@ def scaled_fp8_quant(
             # torch.ops._C.dynamic_per_token_scaled_fp8_quant(
             #     output, input, scale, scale_ub
             # )
-            dynamic_per_token_scaled_fp8_quant(
+            torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant(
                  output, input, scale, scale_ub
             )
         else:

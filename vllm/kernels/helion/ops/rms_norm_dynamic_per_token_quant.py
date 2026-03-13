@@ -52,7 +52,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
 
     for num_tokens, hidden_size in product(num_tokens_list, hidden_size_list):
         input = torch.randn(num_tokens, hidden_size, device="cuda", dtype=in_dtype)
-        output = torch.empty(input.shape, device=input.device, dtype=out_dtype)
+        result = torch.empty(input.shape, device=input.device, dtype=out_dtype)
         scale = torch.empty((num_tokens, 1), device=input.device, dtype=scale_dtype)
         scale_ub = torch.mean(input).to(scale_dtype)
         residual = torch.randn_like(input)
@@ -66,7 +66,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
         epsilon = 1e-6
 
         config_key = f"hidden_size_{hidden_size}_num_tokens_{num_tokens}"
-        inputs[config_key] = (output, input, weight, scale, epsilon, scale_ub, residual)
+        inputs[config_key] = (result, input, weight, scale, epsilon, scale_ub, residual)
 
     return inputs
 
@@ -88,7 +88,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     if not config_keys:
         return None
 
-    output, input, weight, scale, epsilon, scale_ub, residual = args
+    _, input, *_ = args
     num_tokens, hidden_size = input.shape
 
     configs: dict[int, list[int]] = {}
@@ -116,7 +116,21 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
 
 
+def fake_impl(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [hidden_size]
+    scale: torch.Tensor,  # [num_tokens, 1]
+    epsilon: float,
+    scale_ub: torch.Tensor | None = None,  # []
+    residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
+) -> None:
+    return
+
+
 @register_kernel(
+    fake_impl=fake_impl,
+    mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
     input_generator=generate_inputs,
     helion_settings=helion.Settings(
@@ -126,7 +140,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     ),
 )  # type: ignore[misc]
 def rms_norm_dynamic_per_token_quant(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     weight: torch.Tensor,  # [hidden_size]
     scale: torch.Tensor,  # [num_tokens, 1]
@@ -140,11 +154,11 @@ def rms_norm_dynamic_per_token_quant(
     hl.specialize(hidden_size)
 
     fp8_dtype = _get_fp8_dtype()
-    assert output.dtype in [fp8_dtype, torch.int8]
-    assert output.is_contiguous() and input.is_contiguous()
+    assert result.dtype in [fp8_dtype, torch.int8]
+    assert result.is_contiguous() and input.is_contiguous()
 
     if scale_ub is not None:
-        assert output.dtype == fp8_dtype
+        assert result.dtype == fp8_dtype
         assert scale_ub.dtype == torch.float32
 
     assert input.dtype == weight.dtype
@@ -154,7 +168,7 @@ def rms_norm_dynamic_per_token_quant(
     if residual is not None:
         assert residual.dtype == input.dtype
 
-    quant_dtype = output.dtype
+    quant_dtype = result.dtype
     qtype_traits_min: int | float
     qtype_traits_max: int | float
     if quant_dtype == torch.int8:
@@ -205,13 +219,13 @@ def rms_norm_dynamic_per_token_quant(
             else:
                 y_blk = x_blk / s_blk[:, None]
 
-            output[tile_m, tile_n] = y_blk.clamp(qtype_traits_min, qtype_traits_max).to(
-                output.dtype
+            result[tile_m, tile_n] = y_blk.clamp(qtype_traits_min, qtype_traits_max).to(
+                result.dtype
             )
 
 
 def rms_norm_dynamic_per_token_quant_baseline(
-    output: torch.Tensor,  # [num_tokens, hidden_size]
+    result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     weight: torch.Tensor,  # [num_tokens]
     scale: torch.Tensor,  # [num_tokens, 1]
@@ -220,5 +234,5 @@ def rms_norm_dynamic_per_token_quant_baseline(
     residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
 ) -> None:
     torch.ops._C.rms_norm_dynamic_per_token_quant(
-        output, input, weight, scale, epsilon, scale_ub, residual
+        result, input, weight, scale, epsilon, scale_ub, residual
     )
