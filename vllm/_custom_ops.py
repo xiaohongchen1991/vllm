@@ -331,13 +331,17 @@ def rotary_embedding(
 def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
-    torch.ops._C.rms_norm(out, input, weight, epsilon)
+    torch.ops.vllm_helion.rms_norm(out, input, weight, epsilon)
+    # torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+    output = torch.empty_like(input)
+    torch.ops.vllm_helion.rms_norm(output, input, weight, epsilon, residual)
+    input.copy_(output)
+    # torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
 def fused_qk_norm_rope(

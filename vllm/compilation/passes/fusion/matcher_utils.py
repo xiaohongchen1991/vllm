@@ -26,8 +26,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
-RMS_OP = torch.ops._C.rms_norm.default
-RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+# RMS_OP = torch.ops._C.rms_norm.default
+# RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+RMS_OP = torch.ops.vllm_helion.rms_norm.default
+RMS_ADD_OP = torch.ops.vllm_helion.rms_norm.default
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
@@ -45,7 +47,8 @@ if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
-SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+# SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+SILU_MUL_OP = torch.ops.vllm_helion.silu_and_mul.default
 
 
 class MatcherCustomOp(ABC):
@@ -204,12 +207,13 @@ class MatcherRMSNorm(MatcherCustomOp):
             return self.forward_rocm_aiter(input, weight)
 
         result = torch.empty_like(input)
-        _, result = auto_functionalized(
+        _, result, _ = auto_functionalized(
             self._rmsnorm_op,
             result=result,
             input=input,
             weight=weight,
             epsilon=self.epsilon,
+            residual=None,
         )
 
         return result
@@ -268,12 +272,14 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         if self.match_rocm_aiter:
             return self.forward_rocm_aiter(input, weight, residual)
 
+        result = torch.empty_like(input)
         _, result, residual = auto_functionalized(
             self._rmsnorm_op,
+            result=result,
             input=input,
-            residual=residual,
             weight=weight,
             epsilon=self.epsilon,
+            residual=residual,
         )
 
         return result, residual

@@ -22,36 +22,6 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
-
-@register_kernel(
-    helion_settings=helion.Settings(
-        autotune_ignore_errors=True,
-        ignore_warnings=[helion.exc.TensorOperationInWrapper],
-    ),
-)  # type: ignore[misc]
-def silu_and_mul(output: torch.Tensor, input: torch.Tensor) -> None:
-    x = input.view(-1, input.shape[-1])
-    num_tokens, two_intermediate_size = x.shape
-    hl.specialize(two_intermediate_size)
-    assert two_intermediate_size % 2 == 0
-    intermediate_size = two_intermediate_size // 2
-
-    y = output.view(-1, output.shape[-1])
-    assert y.shape[0] == num_tokens
-    assert y.shape[1] == intermediate_size
-
-    x_a = x[:, :intermediate_size]
-    x_b = x[:, intermediate_size:]
-
-    for tile_m, tile_n in hl.tile([num_tokens, intermediate_size]):
-        x_a_blk = x_a[tile_m, tile_n]
-        x_b_blk = x_b[tile_m, tile_n]
-        y[tile_m, tile_n] = (
-            torch.nn.functional.silu(x_a_blk.to(torch.float32)) * x_b_blk
-        )
-
-
-@silu_and_mul.register_input_generator  # type: ignore[misc]
 def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO: it is difficult for kernel author to cover all input property combination.
     # Currently, dtypes are fixed. We need optimization to bucket/skip some combinations
@@ -70,20 +40,19 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
             device="cuda",
             dtype=in_dtype,
         )
-        output = torch.empty(
+        result = torch.empty(
             (num_tokens, intermediate_size), device=input.device, dtype=out_dtype
         )
 
         config_key = f"intermediate_size_{intermediate_size}_num_tokens_{num_tokens}"
         inputs[config_key] = (
-            output,
+            result,
             input,
         )
 
     return inputs
 
 
-@silu_and_mul.register_config_picker  # type: ignore[misc]
 def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     """Pick the best pre-tuned config for the given input shape.
     Selection strategy:
@@ -99,9 +68,9 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     if not config_keys:
         return None
 
-    output, _ = args
-    intermediate_size = output.size(-1)
-    num_tokens = output.numel() // intermediate_size
+    result, _ = args
+    intermediate_size = result.size(-1)
+    num_tokens = result.numel() // intermediate_size
 
     configs: dict[int, list[int]] = {}
     for key in config_keys:
@@ -128,5 +97,44 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     return f"intermediate_size_{best_intermediate_size}_num_tokens_{best_num_tokens}"
 
 
-def silu_and_mul_baseline(output: torch.Tensor, input: torch.Tensor) -> None:
-    torch.ops._C.silu_and_mul(output, input)
+def fake_impl(
+    result: torch.Tensor,
+    input: torch.Tensor
+) -> None:
+    return
+
+
+@register_kernel(
+    mutates_args=["result"],
+    config_picker=pick_config,
+    input_generator=generate_inputs,
+    fake_impl=fake_impl,
+    helion_settings=helion.Settings(
+        autotune_ignore_errors=True,
+        ignore_warnings=[helion.exc.TensorOperationInWrapper],
+    ),
+)  # type: ignore[misc]
+def silu_and_mul(result: torch.Tensor, input: torch.Tensor) -> None:
+    x = input.view(-1, input.shape[-1])
+    num_tokens, two_intermediate_size = x.shape
+    hl.specialize(two_intermediate_size)
+    assert two_intermediate_size % 2 == 0
+    intermediate_size = two_intermediate_size // 2
+
+    y = result.view(-1, result.shape[-1])
+    assert y.shape[0] == num_tokens
+    assert y.shape[1] == intermediate_size
+
+    x_a = x[:, :intermediate_size]
+    x_b = x[:, intermediate_size:]
+
+    for tile_m, tile_n in hl.tile([num_tokens, intermediate_size]):
+        x_a_blk = x_a[tile_m, tile_n]
+        x_b_blk = x_b[tile_m, tile_n]
+        y[tile_m, tile_n] = (
+            torch.nn.functional.silu(x_a_blk.to(torch.float32)) * x_b_blk
+        )
+
+
+def silu_and_mul_baseline(result: torch.Tensor, input: torch.Tensor) -> None:
+    torch.ops._C.silu_and_mul(result, input)

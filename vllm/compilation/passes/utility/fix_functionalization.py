@@ -99,6 +99,9 @@ class FixFunctionalizationPass(VllmInductorPass):
             elif at_target == torch.ops._C.fused_add_rms_norm.default:
                 mutated_args = {1: "input", 2: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
+            elif at_target == torch.ops.vllm_helion.rms_norm.default:
+                mutated_args = {1: "result", 2: "residual"}
+                self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
                 mutated_args = {1: "result", 2: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
@@ -131,6 +134,11 @@ class FixFunctionalizationPass(VllmInductorPass):
             # silu_and_mul and silu_and_mul_quant. The kwargs
             # pathway gets the wrong answer.
             elif at_target == torch.ops._C.silu_and_mul.default:
+                mutated_args = {1: "result"}
+                self.defunctionalize(
+                    graph, node, mutated_args, args=("result", "input")
+                )
+            elif at_target == torch.ops.vllm_helion.silu_and_mul.default:
                 mutated_args = {1: "result"}
                 self.defunctionalize(
                     graph, node, mutated_args, args=("result", "input")
