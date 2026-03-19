@@ -59,8 +59,8 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
             )
         ).to(in_dtype)
         b = b.t()
-        scale_a = 0.5 + torch.rand(num_tokens, 1, dtype=scale_dtype, device="cuda")
-        scale_b = 0.5 + torch.rand(feature_size, 1, dtype=scale_dtype, device="cuda")
+        scale_a = 0.5 + torch.rand(num_tokens, dtype=scale_dtype, device="cuda")
+        scale_b = 0.5 + torch.rand(feature_size, dtype=scale_dtype, device="cuda")
         bias = 0.5 * (torch.rand(feature_size, dtype=out_dtype, device="cuda") - 0.5)
 
         config_key = (
