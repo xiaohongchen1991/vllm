@@ -36,8 +36,8 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [2048, 4096, 8192]
+    num_tokens_list = [256]
+    hidden_size_list = [2048]
     in_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
     out_dtype: torch.dtype = torch.bfloat16
@@ -111,6 +111,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     input_generator=generate_inputs,
     helion_settings=helion.Settings(
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
+        autotune_config_overrides={"block_sizes": [64, 128, 256], "l2_groupings": None, "indexing": ["pointer", "pointer", "pointer"]},
     ),
 )  # type: ignore[misc]
 def scaled_mm(
@@ -123,8 +124,8 @@ def scaled_mm(
 ) -> torch.Tensor:
     M, K = a.shape
     N = b.shape[1]
-    hl.specialize(K)
-    hl.specialize(N)
+    # hl.specialize(K)
+    # hl.specialize(N)
 
     assert N > 0 and K > 0 and M > 0
     assert b.shape[0] == K
@@ -149,25 +150,28 @@ def scaled_mm(
     for tile_m, tile_n in hl.tile([M, N]):
         accumulator = hl.zeros([tile_m, tile_n], accumulator_dtype)
         for tile_k in hl.tile(K):
+            a_blk = a[tile_m, tile_k]
+            b_blk = b[tile_k, tile_n]
             accumulator = hl.dot(
-                a[tile_m, tile_k],
-                b[tile_k, tile_n],
+                a_blk,
+                b_blk,
                 acc=accumulator,
-                out_dtype=accumulator_dtype,
             )
 
-        scale_a_mask = (tile_m.index < scale_a.shape[0])[:, None]
-        scale_a_blk = torch.where(scale_a_mask, scale_a[tile_m, :], scale_a[0, 0])
-        accumulator = scale_a_blk * accumulator.to(torch.float32)
+        # # scale_a_mask = (tile_m.index < scale_a.shape[0])[:, None]
+        # # scale_a_blk = torch.where(scale_a_mask, scale_a[tile_m, :], scale_a[0, 0])
+        # scale_a_blk = scale_a[tile_m, :]
+        # accumulator = scale_a_blk * accumulator.to(torch.float32)
 
-        scale_b_mask = (tile_n.index < scale_b.shape[0])[:, None]
-        scale_b_blk = torch.where(scale_b_mask, scale_b[tile_n, :], scale_b[0, 0])
-        accumulator = scale_b_blk.T * accumulator.to(torch.float32)
+        # # scale_b_mask = (tile_n.index < scale_b.shape[0])[:, None]
+        # # scale_b_blk = torch.where(scale_b_mask, scale_b[tile_n, :], scale_b[0, 0])
+        # scale_b_blk = scale_b[tile_n, :]
+        # accumulator = scale_b_blk.T * accumulator.to(torch.float32)
 
         c_blk = accumulator.to(out_dtype)
 
-        if bias is not None:
-            c_blk += bias[tile_n]
+        # if bias is not None:
+        #     c_blk += bias[tile_n]
 
         c[tile_m, tile_n] = c_blk
 
