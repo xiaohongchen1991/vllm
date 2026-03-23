@@ -117,10 +117,23 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
 
 
+def fake_impl(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [hidden_size]
+    scale: torch.Tensor,  # [num_tokens, 1]
+    epsilon: float,
+    scale_ub: torch.Tensor | None = None,  # []
+    residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
+) -> None:
+    return
+
+
 @register_kernel(
     mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
     input_generator=generate_inputs,
+    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
