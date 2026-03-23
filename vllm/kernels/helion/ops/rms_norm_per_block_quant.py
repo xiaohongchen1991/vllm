@@ -147,10 +147,25 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     )
 
 
+def fake_impl(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [hidden_size]
+    scale: torch.Tensor,  # [num_tokens, groups_per_row]
+    epsilon: float,
+    scale_ub: torch.Tensor,  # []
+    residual: torch.Tensor,  # [num_tokens, hidden_size]
+    group_size: int,
+    is_scale_transposed: bool,  # dummy
+) -> None:
+    return
+
+
 @register_kernel(
     mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
     input_generator=generate_inputs,
+    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
