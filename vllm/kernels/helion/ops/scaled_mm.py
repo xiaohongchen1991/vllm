@@ -108,9 +108,24 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
 
 
+def fake_impl(
+    a: torch.Tensor,  # [M, K]
+    b: torch.Tensor,  # [K, N]
+    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,  # [N]
+) -> torch.Tensor:
+    M= a.shape[0]
+    N = b.shape[1]
+    c = torch.empty((M, N), dtype=out_dtype, device=a.device)
+    return c
+
+
 @register_kernel(
     config_picker=pick_config,
     input_generator=generate_inputs,
+    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_atol=1.0,
         autotune_baseline_rtol=1e-1,
