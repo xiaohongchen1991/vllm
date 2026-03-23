@@ -28,6 +28,9 @@ from vllm.platforms import current_platform
 from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import (
     dynamic_per_token_scaled_fp8_quant,
 )
+from vllm.kernels.helion.ops.per_token_group_fp8_quant import (
+    per_token_group_fp8_quant,
+)
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -45,8 +48,14 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out  # noqa: E501
 
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128Sym] = (
+        torch.ops.vllm_helion.per_token_group_fp8_quant.default
+    )  # noqa: E501
+    QUANT_OPS[kFp8Dynamic64Sym] = (
+        torch.ops.vllm_helion.per_token_group_fp8_quant.default
+    )  # noqa: E501
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
