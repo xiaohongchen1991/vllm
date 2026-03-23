@@ -93,10 +93,20 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
 
 
+def fake_impl(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    scale: torch.Tensor,  # [num_tokens, 1]
+    scale_ub: torch.Tensor | None = None,  # scalar tensor
+) -> None:
+    return
+
+
 @register_kernel(
     mutates_args=["result", "scale"],
     config_picker=pick_config,
     input_generator=generate_inputs,
+    fake_impl=fake_impl,
 )  # type: ignore[misc]
 def dynamic_per_token_scaled_fp8_quant(
     result: torch.Tensor,  # [num_tokens, hidden_size]
