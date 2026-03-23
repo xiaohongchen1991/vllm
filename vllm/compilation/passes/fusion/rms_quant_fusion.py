@@ -32,6 +32,9 @@ from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
 )
+from vllm.kernels.helion.ops.rms_norm_dynamic_per_token_quant import (
+    rms_norm_dynamic_per_token_quant,
+)
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -108,12 +111,18 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8StaticTensorSym, True
     ): torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, False
+    # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, True
+    # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, False
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
-    ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, False
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
