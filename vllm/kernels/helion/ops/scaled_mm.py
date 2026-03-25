@@ -37,13 +37,15 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
     num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [2048, 4096, 8192]
+    hidden_size_list = [4096, 12288]
+    feature_size_list = [4096, 6144, 24576]
     in_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
     out_dtype: torch.dtype = torch.bfloat16
     inputs = {}
-    for num_tokens, hidden_size in product(num_tokens_list, hidden_size_list):
-        feature_size = hidden_size * 4
+    for num_tokens, hidden_size, feature_size in product(
+        num_tokens_list, hidden_size_list, feature_size_list
+    ):
         a = (
             0.25
             * torch.rand(num_tokens, hidden_size, dtype=torch.float32, device="cuda")
@@ -57,7 +59,10 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
         scale_b = 0.25 * torch.rand(feature_size, 1, dtype=scale_dtype, device="cuda")
         bias = torch.rand(feature_size, dtype=out_dtype, device="cuda")
 
-        config_key = f"hidden_size_{hidden_size}_num_tokens_{num_tokens}"
+        config_key = (
+            f"hidden_size_{hidden_size}_"
+            f"feature_size_{feature_size}_num_tokens_{num_tokens}"
+        )
         inputs[config_key] = (a, b, scale_a, scale_b, out_dtype, bias)
 
     return inputs
@@ -69,43 +74,57 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     Selection strategy:
       1. Find the closest hidden_size among available configs
          (exact match preferred).
-      2. Among the num_tokens values tuned for that hidden_size, pick
+      2. Find the closest feature_size among available configs
+         (exact match preferred).
+      3. Among the num_tokens values tuned for that hidden_size and feature_size, pick
          the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
 
     Config keys must be "default" or follow the format
-    "hidden_size_{int}_num_tokens_{int}".
+    "hidden_size_{int}_feature_size_{int}_num_tokens_{int}".
     """
 
     if not config_keys:
         return None
 
-    a, *_ = args
+    a, b, *_ = args
     num_tokens, hidden_size = a.shape
+    feature_size = b.shape[1]
 
-    configs: dict[int, list[int]] = {}
+    configs: dict[int, dict[int, list[int]]] = {}
     for key in config_keys:
         if key == "default":
             continue
-        match = re.fullmatch(r"hidden_size_(\d+)_num_tokens_(\d+)", key)
+        match = re.fullmatch(
+            r"hidden_size_(\d+)_feature_size_(\d+)_num_tokens_(\d+)", key
+        )
         if not match:
             raise ValueError(
                 f"Malformed config key '{key}', "
-                f"expected format 'hidden_size_{{int}}_num_tokens_{{int}}'"
+                f"expected format 'hidden_size_{{int}}_"
+                f"feature_size_{{int}}_num_tokens_{{int}}'"
             )
-        hidden_size_str, num_tokens_str = match.groups()
-        configs.setdefault(int(hidden_size_str), []).append(int(num_tokens_str))
+        hidden_size_str, feature_size_str, num_tokens_str = match.groups()
+        configs.setdefault(int(hidden_size_str), {}).setdefault(
+            int(feature_size_str), []
+        ).append(int(num_tokens_str))
 
     if not configs:
         return "default" if "default" in config_keys else None
 
     best_hidden_size = min(configs, key=lambda s: abs(s - hidden_size))
-    available_num_tokens = sorted(configs[best_hidden_size])
+    best_feature_size = min(
+        configs[best_hidden_size], key=lambda s: abs(s - feature_size)
+    )
+    available_num_tokens = sorted(configs[best_hidden_size][best_feature_size])
     best_num_tokens = next(
         (n for n in available_num_tokens if n >= num_tokens), available_num_tokens[-1]
     )
 
-    return f"hidden_size_{best_hidden_size}_num_tokens_{best_num_tokens}"
+    return (
+        f"hidden_size_{best_hidden_size}_feature_size_"
+        f"{best_feature_size}_num_tokens_{best_num_tokens}"
+    )
 
 
 def fake_impl(
@@ -116,7 +135,7 @@ def fake_impl(
     out_dtype: torch.dtype,
     bias: torch.Tensor | None = None,  # [N]
 ) -> torch.Tensor:
-    M= a.shape[0]
+    M = a.shape[0]
     N = b.shape[1]
     c = torch.empty((M, N), dtype=out_dtype, device=a.device)
     return c
