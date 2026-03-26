@@ -31,7 +31,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
     num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [2048, 4096, 8192]
+    hidden_size_list = [2048, 4096, 8192, 12288]
     group_size_list = [64, 128]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
