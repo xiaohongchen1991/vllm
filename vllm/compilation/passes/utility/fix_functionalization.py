@@ -12,6 +12,9 @@ from vllm.platforms import current_platform
 
 from ..fx_utils import is_func
 from ..vllm_inductor_pass import VllmInductorPass
+from vllm.kernels.helion.ops.rms_norm_dynamic_per_token_quant import (
+    rms_norm_dynamic_per_token_quant,
+)
 
 logger = init_logger(__name__)
 
@@ -104,8 +107,10 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.defunctionalize(graph, node, mutated_args)
             elif (
                 at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default
+                # or at_target
+                # == torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default
                 or at_target
-                == torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default
+                == rms_norm_dynamic_per_token_quant
             ):  # noqa: E501
                 mutated_args = {1: "result", 2: "scale", 3: "residual"}
                 self.defunctionalize(graph, node, mutated_args)

@@ -41,7 +41,8 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     # kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    # kFp8DynamicTokenSym: torch.ops.vllm_helion.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
+    kFp8DynamicTokenSym: dynamic_per_token_scaled_fp8_quant,  # noqa: E501
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
@@ -50,11 +51,17 @@ if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
 if current_platform.is_cuda():
     # QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     # QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic128Sym] = (
+    #     torch.ops.vllm_helion.per_token_group_fp8_quant.default
+    # )  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic64Sym] = (
+    #     torch.ops.vllm_helion.per_token_group_fp8_quant.default
+    # )  # noqa: E501
     QUANT_OPS[kFp8Dynamic128Sym] = (
-        torch.ops.vllm_helion.per_token_group_fp8_quant.default
+        per_token_group_fp8_quant
     )  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = (
-        torch.ops.vllm_helion.per_token_group_fp8_quant.default
+        per_token_group_fp8_quant
     )  # noqa: E501
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default

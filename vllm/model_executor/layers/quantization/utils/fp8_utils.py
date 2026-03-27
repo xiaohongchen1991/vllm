@@ -46,6 +46,10 @@ from vllm.utils.flashinfer import (
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.kernels.helion.ops.per_token_group_fp8_quant import (
+    per_token_group_fp8_quant,
+)
+
 
 logger = init_logger(__name__)
 
@@ -935,7 +939,19 @@ def per_token_group_quant_fp8(
         #     column_major_scales,
         #     tma_aligned_scales,
         # )
-        torch.ops.vllm_helion.per_token_group_fp8_quant(
+        # torch.ops.vllm_helion.per_token_group_fp8_quant(
+        #     x,
+        #     x_q,
+        #     x_s,
+        #     group_size,
+        #     eps,
+        #     fp8_min,
+        #     fp8_max,
+        #     use_ue8m0,
+        #     column_major_scales,
+        #     tma_aligned_scales,
+        # )
+        per_token_group_fp8_quant(
             x,
             x_q,
             x_s,

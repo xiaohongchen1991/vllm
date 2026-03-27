@@ -106,12 +106,18 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     # FusedRMSQuantKey(
     #     kFp8DynamicTokenSym, True
     # ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, False
+    # ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8DynamicTokenSym, True
+    # ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, False
-    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): rms_norm_dynamic_per_token_quant,  # noqa: E501
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
-    ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    ): rms_norm_dynamic_per_token_quant,  # noqa: E501
     # FusedRMSQuantKey(
     #     kFp8Dynamic128Sym, False
     # ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
@@ -124,18 +130,30 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     # FusedRMSQuantKey(
     #     kFp8Dynamic64Sym, True
     # ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic128Sym, False
+    # ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic128Sym, True
+    # ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic64Sym, False
+    # ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic64Sym, True
+    # ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, False
-    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    ): rms_norm_per_block_quant,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, True
-    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    ): rms_norm_per_block_quant,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, False
-    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    ): rms_norm_per_block_quant,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, True
-    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
+    ): rms_norm_per_block_quant,  # noqa: E501
 }
 
 
