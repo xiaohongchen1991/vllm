@@ -150,6 +150,7 @@ def fake_impl(
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
+        torch_compile_fusion=True,
         autotune_baseline_atol=1.0,
         autotune_baseline_rtol=5e-1,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
