@@ -59,8 +59,8 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
             )
         ).to(in_dtype)
         b = b.t()
-        scale_a = 0.5 + torch.rand(num_tokens, dtype=scale_dtype, device="cuda")
-        scale_b = 0.5 + torch.rand(feature_size, dtype=scale_dtype, device="cuda")
+        scale_a = 0.5 + torch.rand((num_tokens, 1), dtype=scale_dtype, device="cuda")
+        scale_b = 0.5 + torch.rand((feature_size, 1), dtype=scale_dtype, device="cuda")
         bias = 0.5 * (torch.rand(feature_size, dtype=out_dtype, device="cuda") - 0.5)
 
         config_key = (
@@ -90,8 +90,12 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
         return None
 
     a, b, scale_a, scale_b, *_ = args
-    print("a shape: ", a.shape)
-    print("b shape: ", b.shape)
+    # print("a shape: ", a.shape)
+    # print("b shape: ", b.shape)
+    # print("scale_a shape: ", scale_a.shape)
+    # print("scale_b shape: ", scale_b.shape)
+    # has_bias = len(args) == 6
+    # print("has bias: ", has_bias)
     num_tokens, hidden_size = a.shape
     feature_size = b.shape[1]
 
@@ -150,7 +154,7 @@ def fake_impl(
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
-        torch_compile_fusion=True,
+        # torch_compile_fusion=True,
         autotune_baseline_atol=1.0,
         autotune_baseline_rtol=5e-1,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
@@ -213,7 +217,7 @@ def scaled_mm(
         if bias is not None:
             c_blk += bias[tile_n]
 
-        c[tile_m, tile_n] = c_blk
+        hl.store(c, [tile_m, tile_n], c_blk, extra_mask=(tile_m.index < M)[:, None])
 
     return c
 
