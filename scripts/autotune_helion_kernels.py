@@ -22,12 +22,18 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
+import torch.distributed._symmetric_memory as symm_mem
+from torch._C._distributed_c10d import _SymmetricMemory
 from torch._subclasses.fake_tensor import FakeTensorMode
+
+_SymmetricMemory.signal_pad_size = 1024 * 1024 * 16
 
 try:
     import helion
@@ -97,6 +103,15 @@ def autotune_kernel(
         kernel_name,
         autotune_effort,
     )
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
+        rank = int(os.environ["LOCAL_RANK"])
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        dist.init_process_group("nccl")
+        symm_mem.enable_symm_mem_for_group(dist.group.WORLD.group_name)
+
     kernel_wrapper = get_kernel_by_name(kernel_name)
     if kernel_wrapper is None:
         error_msg = f"Kernel '{kernel_name}' not found in registry"
@@ -233,6 +248,9 @@ def autotune_kernel(
             failed=0,
             configs={},
         )
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
 
 
 def summarize_results(results: dict[str, AutotuneResult]) -> bool:
