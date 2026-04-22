@@ -29,15 +29,43 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [2048, 4096, 6144, 12288]
-    feature_size_list = [4096, 6144, 12288, 24576]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    b_shape_list = [
+        # Qwen3-1.7B
+        (2048, 4096),
+        (2048, 2048),
+        (2048, 12288),
+        (6144, 2048),
+
+        # Qwen3-8B
+        (4096, 6144),
+        (4096, 4096),
+        (4096, 24576),
+        (12288, 4096),
+
+        # Qwen3.5-35B-A3B
+        (2048, 1024),
+        (512, 2048),
+        (2048, 9216),
+        (4096, 2048),
+
+        # Meta-Llama-3.3-70B
+        (8192, 10240),
+        (8192, 8192),
+        (8192, 57344),
+        (28672, 8192),
+        (8192, 5120),
+        (4096, 8192),
+        (8192, 28672),
+        (14336, 8192),
+    ]
+
     in_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
     out_dtype: torch.dtype = torch.bfloat16
     inputs = {}
-    for num_tokens, hidden_size, feature_size in product(
-        num_tokens_list, hidden_size_list, feature_size_list
+    for num_tokens, (hidden_size, feature_size) in product(
+        num_tokens_list, b_shape_list
     ):
         scale = 1.0 / math.sqrt(hidden_size)
         a = (
@@ -89,13 +117,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     if not config_keys:
         return None
 
-    a, b, scale_a, scale_b, *_ = args
-    # print("a shape: ", a.shape)
-    # print("b shape: ", b.shape)
-    # print("scale_a shape: ", scale_a.shape)
-    # print("scale_b shape: ", scale_b.shape)
-    # has_bias = len(args) == 6
-    # print("has bias: ", has_bias)
+    a, b, *_ = args
     num_tokens, hidden_size = a.shape
     feature_size = b.shape[1]
 
@@ -230,11 +252,14 @@ def baseline(
     out_dtype: torch.dtype,
     bias: torch.Tensor | None = None,  # [N]
 ) -> torch.Tensor:
-    out = torch.mm(a.to(torch.float32), b.to(torch.float32))
-    out = scale_a * out
-    out = scale_b.T * out
-    out = out.to(out_dtype)
-    if bias is not None:
-        out = out + bias
+    # out = torch.mm(a.to(torch.float32), b.to(torch.float32))
+    # out = scale_a * out
+    # out = scale_b.T * out
+    # out = out.to(out_dtype)
+    # if bias is not None:
+    #     out = out + bias
+
+    out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
