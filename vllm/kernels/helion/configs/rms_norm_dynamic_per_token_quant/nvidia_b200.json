@@ -7,27 +7,87 @@
     ],
     "range_unroll_factors": [
       0,
-      2,
+      0,
       4,
       0
     ],
     "range_warp_specializes": [
       null,
-      false,
       null,
-      false
+      false,
+      true
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      false,
       true,
-      null
+      false,
+      false
     ],
     "range_flattens": [
       null,
-      false,
+      null,
       true,
+      true
+    ],
+    "load_eviction_policies": [
+      "first",
+      "first",
+      "",
+      "first",
+      "last",
+      "first",
+      "first",
+      "",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 5,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_1": {
+    "block_sizes": [
+      2048,
+      2048,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "range_warp_specializes": [
+      false,
+      null,
+      null,
+      null
+    ],
+    "range_multi_buffers": [
+      null,
+      null,
+      null,
+      false
+    ],
+    "range_flattens": [
+      null,
+      null,
+      null,
       null
     ],
     "load_eviction_policies": [
@@ -35,40 +95,530 @@
       "last",
       "first",
       "",
+      "last",
       "",
+      "first",
+      "last",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "persistent_blocked",
+    "num_sm_multiplier": 2
+  },
+  "hidden_size_8192_num_tokens_1": {
+    "block_sizes": [
+      8192,
+      8192,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      0,
+      0
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      null,
+      true
+    ],
+    "range_flattens": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
       "",
       "first",
       "",
-      "first"
+      "first",
+      "last",
+      "",
+      "first",
+      "last"
     ],
     "num_warps": 16,
-    "num_stages": 2,
+    "num_stages": 3,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_2": {
+    "block_sizes": [
+      2048,
+      2048,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      3,
+      4,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      false,
+      false
+    ],
+    "range_flattens": [
+      null,
+      null,
+      true,
+      true
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "last",
+      "first",
+      "",
+      "first",
+      "last",
+      "",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 5,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_2": {
+    "block_sizes": [
+      4096,
+      4096,
+      4096
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      false,
+      null
+    ],
+    "range_flattens": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "",
+      "first",
+      "first",
+      "first",
+      "last",
+      "last",
+      "last",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 4,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_num_tokens_2": {
+    "block_sizes": [
+      8192,
+      8192,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      2,
+      0
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      null,
+      true
+    ],
+    "range_flattens": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "last",
+      "last",
+      "first",
+      "",
+      "",
+      "",
+      "first",
+      "first"
+    ],
+    "num_warps": 32,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_4": {
+    "block_sizes": [
+      2048,
+      2048,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      4,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      false,
+      false
+    ],
+    "range_flattens": [
+      null,
+      true,
+      true,
+      true
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "last",
+      "first",
+      "first",
+      "first",
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 16,
+    "num_stages": 8,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_4": {
+    "block_sizes": [
+      4096,
+      4096,
+      4096
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      0,
+      2
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      null,
+      false
+    ],
+    "range_flattens": [
+      null,
+      null,
+      null,
+      true
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "last",
+      "",
+      "first",
+      "",
+      "last",
+      "first",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 5,
+    "indexing": [
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_num_tokens_4": {
+    "block_sizes": [
+      8192,
+      4096,
+      4096
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      0,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      false,
+      null
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      false,
+      false
+    ],
+    "range_flattens": [
+      null,
+      null,
+      false,
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      "last",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_8": {
+    "block_sizes": [
+      2048,
+      2048,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      4,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      false,
+      false
+    ],
+    "range_flattens": [
+      null,
+      true,
+      true,
+      true
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "",
+      "first",
+      "",
+      "first",
+      "first",
+      "last",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 5,
     "indexing": [
       "pointer",
       "pointer",
       "pointer",
       "tensor_descriptor",
-      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
       "tensor_descriptor"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
-  "hidden_size_4096_num_tokens_1": {
+  "hidden_size_4096_num_tokens_8": {
     "block_sizes": [
-      256,
-      512,
-      256
+      4096,
+      4096,
+      4096
     ],
     "range_unroll_factors": [
       0,
-      4,
-      2,
+      3,
+      0,
       2
     ],
     "range_warp_specializes": [
@@ -80,188 +630,8 @@
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      null,
-      false,
-      null
-    ],
-    "range_flattens": [
-      null,
       false,
       false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "last",
-      "last",
-      "first",
-      "",
-      "last",
-      "first",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_8192_num_tokens_1": {
-    "block_sizes": [
-      8192,
-      8192,
-      8192
-    ],
-    "range_unroll_factors": [
-      0,
-      1,
-      3,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      false,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      false,
-      true,
-      false
-    ],
-    "range_flattens": [
-      null,
-      false,
-      true,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "first",
-      "first",
-      "first",
-      "first",
-      "",
-      "last",
-      "last",
-      "last"
-    ],
-    "num_warps": 32,
-    "num_stages": 2,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_2048_num_tokens_2": {
-    "block_sizes": [
-      2048,
-      2048,
-      1024
-    ],
-    "range_unroll_factors": [
-      0,
-      1,
-      4,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      false,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      true,
-      true,
-      false
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "last",
-      "last",
-      "first"
-    ],
-    "num_warps": 4,
-    "num_stages": 4,
-    "indexing": [
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_4096_num_tokens_2": {
-    "block_sizes": [
-      4096,
-      2048,
-      4096
-    ],
-    "range_unroll_factors": [
-      0,
-      1,
-      2,
-      1
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      false,
-      false
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      null,
       false
     ],
     "range_flattens": [
@@ -273,514 +643,154 @@
     "load_eviction_policies": [
       "last",
       "last",
-      "",
       "first",
       "",
-      "",
       "first",
+      "last",
       "first",
-      "last"
-    ],
-    "num_warps": 16,
-    "num_stages": 3,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_8192_num_tokens_2": {
-    "block_sizes": [
-      4096,
-      8192,
-      2048
-    ],
-    "range_unroll_factors": [
-      0,
-      4,
-      4,
-      3
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      false,
-      null,
-      false
-    ],
-    "range_flattens": [
-      null,
-      false,
-      null,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "first",
-      "first",
-      "first",
-      "",
-      "",
-      "",
+      "last",
       "last"
     ],
     "num_warps": 16,
     "num_stages": 7,
     "indexing": [
       "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
       "pointer",
       "pointer",
       "tensor_descriptor",
       "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
       "tensor_descriptor"
     ],
-    "pid_type": "flat"
-  },
-  "hidden_size_2048_num_tokens_4": {
-    "block_sizes": [
-      64,
-      1024,
-      256
-    ],
-    "range_unroll_factors": [
-      1,
-      0,
-      2,
-      4
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_multi_buffers": [
-      null,
-      true,
-      false,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null,
-      false,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "last",
-      "first",
-      "last",
-      "first",
-      "last",
-      "",
-      "last",
-      "first"
-    ],
-    "num_warps": 1,
-    "num_stages": 7,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 32,
-    "maxnreg": 128
-  },
-  "hidden_size_4096_num_tokens_4": {
-    "block_sizes": [
-      4096,
-      4096,
-      2048
-    ],
-    "range_unroll_factors": [
-      0,
-      2,
-      4,
-      1
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      false,
-      false
-    ],
-    "range_flattens": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "last",
-      "last",
-      "last",
-      "last",
-      "",
-      "first",
-      "last",
-      ""
-    ],
-    "num_warps": 32,
-    "num_stages": 4,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_8192_num_tokens_4": {
-    "block_sizes": [
-      8192,
-      8192,
-      2048
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      2,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      true,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      true,
-      false
-    ],
-    "range_flattens": [
-      null,
-      null,
-      true,
-      true
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "last",
-      "last",
-      "last",
-      "last",
-      "first",
-      "",
-      "first"
-    ],
-    "num_warps": 16,
-    "num_stages": 4,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_2048_num_tokens_8": {
-    "block_sizes": [
-      32,
-      2048,
-      512
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      0,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      true
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null,
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "last",
-      "",
-      "",
-      "last",
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_4096_num_tokens_8": {
-    "block_sizes": [
-      4096,
-      4096,
-      1024
-    ],
-    "range_unroll_factors": [
-      0,
-      2,
-      4,
-      1
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      false,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null,
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "first",
-      "last",
-      "",
-      "first",
-      "last",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_8": {
     "block_sizes": [
-      4096,
       8192,
+      8192,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      null,
+      true
+    ],
+    "range_flattens": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "last",
+      "last",
+      "first",
+      "first",
+      "last",
+      "first",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 3,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_16": {
+    "block_sizes": [
+      2048,
+      2048,
       1024
     ],
     "range_unroll_factors": [
-      1,
-      1,
+      0,
+      0,
       3,
       3
     ],
     "range_warp_specializes": [
       null,
-      null,
-      null,
+      false,
+      false,
       null
     ],
+    "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      false,
-      true,
-      false
+      null,
+      null,
+      true
     ],
     "range_flattens": [
       null,
-      null,
       false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "last",
-      "last",
-      "",
-      "last",
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 16,
-    "maxnreg": 64
-  },
-  "hidden_size_2048_num_tokens_16": {
-    "block_sizes": [
-      1024,
-      512,
-      512
-    ],
-    "range_unroll_factors": [
-      4,
-      4,
-      1,
-      1
-    ],
-    "range_warp_specializes": [
-      false,
-      null,
-      false,
-      false
-    ],
-    "range_multi_buffers": [
-      false,
-      null,
-      null,
-      null
-    ],
-    "range_flattens": [
       true,
-      false,
-      null,
-      false
+      true
     ],
     "load_eviction_policies": [
+      "last",
       "first",
-      "first",
-      "",
-      "",
       "",
       "last",
-      "last",
+      "",
+      "first",
+      "",
       "",
       ""
     ],
-    "num_warps": 2,
-    "num_stages": 4,
+    "num_warps": 16,
+    "num_stages": 7,
     "indexing": [
       "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
       "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
       "pointer"
     ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 8,
-    "maxnreg": 128
+    "atomic_indexing": [],
+    "pid_type": "flat"
   },
   "hidden_size_4096_num_tokens_16": {
     "block_sizes": [
@@ -790,46 +800,47 @@
     ],
     "range_unroll_factors": [
       0,
-      0,
-      0,
-      0
+      3,
+      3,
+      2
     ],
     "range_warp_specializes": [
       null,
+      false,
       null,
-      null,
-      null
+      false
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      null,
       false,
-      true
+      true,
+      false
     ],
     "range_flattens": [
       null,
       null,
-      null,
-      false
+      true,
+      true
     ],
     "load_eviction_policies": [
+      "last",
+      "",
+      "last",
       "",
       "first",
       "",
       "",
       "last",
-      "",
-      "last",
-      "last",
-      "last"
+      "first"
     ],
     "num_warps": 16,
-    "num_stages": 2,
+    "num_stages": 8,
     "indexing": [
       "pointer",
+      "tensor_descriptor",
       "pointer",
-      "pointer",
+      "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
       "pointer",
@@ -837,9 +848,9 @@
       "tensor_descriptor",
       "pointer",
       "pointer",
-      "tensor_descriptor",
       "pointer"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_16": {
@@ -850,118 +861,120 @@
     ],
     "range_unroll_factors": [
       0,
-      0,
       4,
-      0
+      0,
+      1
     ],
     "range_warp_specializes": [
       null,
       null,
-      null,
-      null
+      false,
+      false
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      true,
       null,
-      null
+      false,
+      true
     ],
     "range_flattens": [
       null,
       null,
-      null,
-      null
+      false,
+      false
     ],
     "load_eviction_policies": [
       "",
+      "",
+      "",
       "last",
       "last",
       "last",
       "",
-      "",
-      "",
-      "",
-      ""
+      "first",
+      "first"
     ],
     "num_warps": 32,
-    "num_stages": 1,
+    "num_stages": 5,
     "indexing": [
-      "pointer",
-      "pointer",
+      "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
       "pointer",
-      "pointer",
-      "pointer",
+      "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_2048_num_tokens_32": {
     "block_sizes": [
-      32,
       2048,
-      512
+      2048,
+      2048
     ],
     "range_unroll_factors": [
       3,
-      1,
+      0,
       4,
-      1
+      4
     ],
     "range_warp_specializes": [
       false,
       false,
-      false,
-      true
+      null,
+      null
     ],
     "range_multi_buffers": [
+      true,
       null,
-      true,
-      true,
-      true
+      false,
+      false
     ],
     "range_flattens": [
       null,
-      true,
       false,
-      null
+      null,
+      true
     ],
     "load_eviction_policies": [
-      "",
-      "last",
-      "first",
-      "",
       "last",
       "",
+      "",
       "first",
-      "first",
+      "last",
+      "",
+      "last",
+      "",
       "last"
     ],
-    "num_warps": 2,
-    "num_stages": 1,
+    "num_warps": 16,
+    "num_stages": 3,
     "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
       "tensor_descriptor",
       "pointer",
       "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
+      "pointer",
       "pointer",
       "pointer"
     ],
+    "atomic_indexing": [],
     "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 8,
-    "maxnreg": 256
+    "num_sm_multiplier": 16,
+    "maxnreg": 32
   },
   "hidden_size_4096_num_tokens_32": {
     "block_sizes": [
@@ -971,178 +984,180 @@
     ],
     "range_unroll_factors": [
       0,
-      4,
-      4,
+      2,
+      2,
       0
     ],
     "range_warp_specializes": [
       null,
       false,
       null,
-      null
+      true
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      false,
+      null,
       false,
       null
     ],
     "range_flattens": [
       null,
-      true,
-      false,
+      null,
+      null,
       null
     ],
     "load_eviction_policies": [
-      "last",
-      "last",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
       "",
       "last",
-      "first",
-      "",
-      "first",
-      "first",
-      "first"
+      "last"
     ],
-    "num_warps": 16,
-    "num_stages": 2,
+    "num_warps": 32,
+    "num_stages": 8,
     "indexing": [
       "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
       "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
       "pointer",
       "tensor_descriptor"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_32": {
     "block_sizes": [
       8192,
       8192,
-      8192
+      4096
     ],
     "range_unroll_factors": [
       0,
       0,
-      4,
-      1
+      1,
+      0
     ],
     "range_warp_specializes": [
       null,
       false,
-      null,
+      false,
       true
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      true,
-      false,
-      false
+      null,
+      null,
+      true
     ],
     "range_flattens": [
       null,
       true,
-      false,
-      true
+      null,
+      false
     ],
     "load_eviction_policies": [
       "last",
-      "last",
-      "first",
-      "last",
-      "first",
-      "last",
-      "last",
       "",
+      "last",
+      "last",
+      "last",
+      "first",
+      "first",
+      "first",
       "first"
     ],
     "num_warps": 16,
-    "num_stages": 2,
+    "num_stages": 1,
     "indexing": [
       "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
       "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
+      "pointer",
+      "pointer",
       "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer"
+      "tensor_descriptor",
+      "tensor_descriptor"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_2048_num_tokens_64": {
     "block_sizes": [
       2048,
       2048,
-      512
+      2048
     ],
     "range_unroll_factors": [
-      1,
+      0,
       4,
       2,
       3
     ],
     "range_warp_specializes": [
-      false,
       null,
       false,
+      null,
       false
     ],
+    "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      true,
-      true,
+      null,
+      false,
       null
     ],
     "range_flattens": [
-      true,
-      false,
       null,
-      false
+      true,
+      null,
+      true
     ],
     "load_eviction_policies": [
+      "last",
+      "first",
+      "last",
+      "first",
+      "",
       "first",
       "last",
       "last",
-      "first",
-      "",
-      "last",
-      "",
-      "",
-      "first"
+      "last"
     ],
     "num_warps": 8,
-    "num_stages": 3,
+    "num_stages": 1,
     "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
       "pointer",
       "pointer",
       "pointer",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
       "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor"
     ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1,
-    "maxnreg": 256
+    "atomic_indexing": [],
+    "pid_type": "flat"
   },
   "hidden_size_4096_num_tokens_64": {
     "block_sizes": [
@@ -1153,8 +1168,8 @@
     "range_unroll_factors": [
       0,
       0,
-      1,
-      0
+      3,
+      1
     ],
     "range_warp_specializes": [
       null,
@@ -1167,77 +1182,78 @@
       null,
       null,
       false,
-      true
+      null
     ],
     "range_flattens": [
       null,
       true,
-      null,
+      true,
       null
     ],
     "load_eviction_policies": [
-      "first",
-      "first",
-      "first",
-      "",
-      "",
+      "last",
       "",
       "first",
+      "",
+      "first",
+      "",
+      "last",
       "first",
       ""
     ],
-    "num_warps": 16,
-    "num_stages": 4,
+    "num_warps": 32,
+    "num_stages": 1,
     "indexing": [
-      "pointer",
+      "tensor_descriptor",
       "pointer",
       "pointer",
       "pointer",
       "tensor_descriptor",
       "pointer",
-      "tensor_descriptor",
       "pointer",
       "pointer",
-      "tensor_descriptor",
+      "pointer",
+      "pointer",
       "tensor_descriptor",
       "pointer"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_64": {
     "block_sizes": [
-      8192,
-      8192,
-      1024
+      4096,
+      4096,
+      8192
     ],
     "range_unroll_factors": [
       0,
-      0,
-      0,
+      1,
+      3,
       0
     ],
     "range_warp_specializes": [
       null,
-      null,
+      false,
       null,
       null
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      null,
       true,
+      null,
       true
     ],
     "range_flattens": [
       null,
-      null,
+      false,
       false,
       null
     ],
     "load_eviction_policies": [
-      "",
-      "",
+      "last",
+      "last",
       "",
       "",
       "",
@@ -1246,267 +1262,87 @@
       "first",
       "first"
     ],
-    "num_warps": 16,
+    "num_warps": 32,
     "num_stages": 1,
     "indexing": [
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
       "pointer",
       "pointer",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
       "pointer",
       "tensor_descriptor"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_2048_num_tokens_128": {
     "block_sizes": [
-      1024,
-      1024,
-      1024
-    ],
-    "range_unroll_factors": [
-      1,
-      4,
-      3,
-      0
-    ],
-    "range_warp_specializes": [
-      false,
-      false,
-      false,
-      true
-    ],
-    "range_multi_buffers": [
-      true,
-      true,
-      null,
-      null
-    ],
-    "range_flattens": [
-      true,
-      false,
-      true,
-      false
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "last",
-      "first",
-      "",
-      "",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 2,
-    "num_stages": 2,
-    "indexing": [
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2,
-    "maxnreg": 256
-  },
-  "hidden_size_4096_num_tokens_128": {
-    "block_sizes": [
-      4096,
-      4096,
-      4096
+      2048,
+      2048,
+      2048
     ],
     "range_unroll_factors": [
       0,
-      1,
+      0,
       3,
-      0
+      3
     ],
     "range_warp_specializes": [
       null,
-      false,
+      null,
       null,
       null
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      null,
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
       true,
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "last",
-      "first",
-      "first",
-      "",
-      "",
-      "first",
-      "first",
-      "last"
-    ],
-    "num_warps": 16,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_8192_num_tokens_128": {
-    "block_sizes": [
-      8192,
-      2048,
-      256
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      2,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_multi_buffers": [
-      null,
-      null,
       true,
       null
     ],
     "range_flattens": [
       null,
-      null,
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "last",
-      "",
-      "",
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 2,
-    "indexing": [
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
-  },
-  "hidden_size_2048_num_tokens_256": {
-    "block_sizes": [
-      2048,
-      2048,
-      1024
-    ],
-    "range_unroll_factors": [
-      1,
-      0,
-      1,
-      4
-    ],
-    "range_warp_specializes": [
-      null,
-      false,
-      null,
-      null
-    ],
-    "range_multi_buffers": [
       true,
-      false,
-      false,
-      null
-    ],
-    "range_flattens": [
-      false,
       null,
-      false,
       false
     ],
     "load_eviction_policies": [
-      "first",
-      "last",
-      "",
       "last",
       "",
       "first",
-      "first",
+      "",
+      "",
+      "",
+      "",
       "last",
-      "first"
+      ""
     ],
-    "num_warps": 4,
-    "num_stages": 7,
+    "num_warps": 8,
+    "num_stages": 4,
     "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
       "pointer",
       "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
       "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
+      "tensor_descriptor"
     ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 16,
-    "maxnreg": 64
+    "atomic_indexing": [],
+    "pid_type": "flat"
   },
-  "hidden_size_4096_num_tokens_256": {
+  "hidden_size_4096_num_tokens_128": {
     "block_sizes": [
       4096,
       4096,
@@ -1514,127 +1350,7 @@
     ],
     "range_unroll_factors": [
       0,
-      2,
-      4,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      true
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      false,
-      true,
-      false
-    ],
-    "range_flattens": [
-      null,
-      false,
-      true,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "first",
-      "first",
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 8,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_8192_num_tokens_256": {
-    "block_sizes": [
-      8192,
-      4096,
-      2048
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      0,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      false,
-      true,
-      true
-    ],
-    "range_flattens": [
-      null,
-      true,
-      true,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "first",
-      "last",
-      "first",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 32,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_2048_num_tokens_512": {
-    "block_sizes": [
-      2048,
-      1024,
-      2048
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
+      3,
       0,
       3
     ],
@@ -1642,48 +1358,354 @@
       null,
       false,
       null,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      false,
+      false,
       null
+    ],
+    "range_flattens": [
+      null,
+      null,
+      false,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "last",
+      "first",
+      "last",
+      "",
+      "",
+      "first",
+      "last",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 5,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_num_tokens_128": {
+    "block_sizes": [
+      8192,
+      4096,
+      4096
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      4,
+      0
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      null,
+      true
+    ],
+    "range_flattens": [
+      null,
+      false,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "",
+      "last",
+      "first",
+      "",
+      "",
+      "first",
+      "last"
+    ],
+    "num_warps": 32,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_256": {
+    "block_sizes": [
+      2048,
+      2048,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      1,
+      2,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      true
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
       true,
+      false,
+      true
+    ],
+    "range_flattens": [
       null,
+      null,
+      true,
       null
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "",
+      "first",
+      "",
+      "first",
+      "last",
+      "",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 7,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_256": {
+    "block_sizes": [
+      4096,
+      2048,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      4,
+      0,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      true,
+      true
     ],
     "range_flattens": [
       null,
       true,
-      false,
-      false
+      null,
+      null
     ],
     "load_eviction_policies": [
       "",
+      "first",
+      "first",
       "last",
-      "last",
+      "first",
       "",
       "first",
-      "last",
-      "last",
-      "first",
-      "last"
+      "",
+      "first"
     ],
-    "num_warps": 8,
-    "num_stages": 8,
+    "num_warps": 32,
+    "num_stages": 6,
     "indexing": [
       "pointer",
       "tensor_descriptor",
       "pointer",
-      "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_num_tokens_256": {
+    "block_sizes": [
+      8192,
+      8192,
+      8192
+    ],
+    "range_unroll_factors": [
+      0,
+      4,
+      2,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      false,
+      true,
+      false
+    ],
+    "range_flattens": [
+      null,
+      false,
+      true,
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "last",
+      "first",
+      "last",
+      "last",
+      "",
+      "first",
+      "first",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 5,
+    "indexing": [
       "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
       "pointer",
       "pointer"
     ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_512": {
+    "block_sizes": [
+      2048,
+      2048,
+      512
+    ],
+    "range_unroll_factors": [
+      0,
+      1,
+      4,
+      2
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      false,
+      false
+    ],
+    "range_flattens": [
+      null,
+      false,
+      false,
+      true
+    ],
+    "load_eviction_policies": [
+      "first",
+      "last",
+      "",
+      "last",
+      "last",
+      "",
+      "first",
+      "",
+      "first"
+    ],
+    "num_warps": 8,
+    "num_stages": 4,
+    "indexing": [
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_4096_num_tokens_512": {
@@ -1694,289 +1716,109 @@
     ],
     "range_unroll_factors": [
       0,
-      1,
+      4,
       3,
       0
     ],
     "range_warp_specializes": [
       null,
-      null,
+      false,
       null,
       null
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      null,
       true,
+      null,
       null
     ],
     "range_flattens": [
       null,
-      false,
       null,
-      true
+      null,
+      false
     ],
     "load_eviction_policies": [
       "first",
-      "last",
       "first",
-      "last",
-      "last",
+      "first",
+      "first",
+      "",
       "",
       "first",
       "",
-      "last"
+      ""
     ],
     "num_warps": 8,
-    "num_stages": 1,
+    "num_stages": 7,
     "indexing": [
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
       "pointer",
       "pointer",
       "tensor_descriptor",
       "pointer",
-      "tensor_descriptor"
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_512": {
     "block_sizes": [
-      8192,
+      4096,
       8192,
       4096
     ],
     "range_unroll_factors": [
+      0,
       4,
       0,
-      0,
-      4
-    ],
-    "range_warp_specializes": [
-      false,
-      null,
-      null,
-      null
-    ],
-    "range_multi_buffers": [
-      true,
-      false,
-      true,
-      true
-    ],
-    "range_flattens": [
-      null,
-      true,
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "first",
-      "last",
-      "first",
-      "",
-      "",
-      "last",
-      "last",
-      ""
-    ],
-    "num_warps": 8,
-    "num_stages": 3,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 2,
-    "maxnreg": 256
-  },
-  "hidden_size_2048_num_tokens_1024": {
-    "block_sizes": [
-      1024,
-      1024,
-      512
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      0,
-      0
+      3
     ],
     "range_warp_specializes": [
       null,
-      null,
+      false,
       false,
       false
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      null,
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "",
-      "",
-      "last",
-      "last",
-      "first",
-      "last",
-      "",
-      ""
-    ],
-    "num_warps": 2,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_4096_num_tokens_1024": {
-    "block_sizes": [
-      2048,
-      4096,
-      2048
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      2,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      null,
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
       false,
       null,
       null
     ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_8192_num_tokens_1024": {
-    "block_sizes": [
-      8192,
-      8192,
-      4096
-    ],
-    "range_unroll_factors": [
-      0,
-      0,
-      0,
-      0
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      null,
-      null,
-      true
-    ],
     "range_flattens": [
       null,
-      true,
       null,
-      null
+      false,
+      false
     ],
     "load_eviction_policies": [
-      "",
-      "last",
-      "",
       "last",
       "",
       "first",
+      "",
       "first",
       "",
-      ""
+      "last",
+      "",
+      "last"
     ],
     "num_warps": 16,
     "num_stages": 2,
     "indexing": [
-      "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
+      "tensor_descriptor",
       "pointer",
       "pointer",
       "pointer",
@@ -1985,72 +1827,13 @@
       "tensor_descriptor",
       "pointer"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
-  "hidden_size_2048_num_tokens_2048": {
+  "hidden_size_2048_num_tokens_1024": {
     "block_sizes": [
       2048,
       2048,
-      512
-    ],
-    "range_unroll_factors": [
-      0,
-      3,
-      4,
-      4
-    ],
-    "range_warp_specializes": [
-      null,
-      false,
-      false,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      false,
-      null
-    ],
-    "range_flattens": [
-      null,
-      false,
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "",
-      "",
-      "last",
-      "",
-      "first",
-      ""
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_4096_num_tokens_2048": {
-    "block_sizes": [
-      4096,
-      4096,
       1024
     ],
     "range_unroll_factors": [
@@ -2061,22 +1844,22 @@
     ],
     "range_warp_specializes": [
       null,
-      null,
+      false,
       null,
       false
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
-      true,
       null,
-      true
+      false,
+      false
     ],
     "range_flattens": [
       null,
       true,
-      true,
-      false
+      false,
+      true
     ],
     "load_eviction_policies": [
       "last",
@@ -2084,27 +1867,272 @@
       "last",
       "last",
       "",
-      "",
       "last",
+      "first",
       "",
-      "first"
+      "last"
     ],
     "num_warps": 4,
-    "num_stages": 4,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_1024": {
+    "block_sizes": [
+      4096,
+      4096,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      4,
+      0,
+      2
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      false,
+      true
+    ],
+    "range_flattens": [
+      null,
+      null,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "last",
+      "last",
+      "last",
+      "",
+      "",
+      "first",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 8,
     "indexing": [
       "pointer",
       "tensor_descriptor",
-      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
       "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_num_tokens_1024": {
+    "block_sizes": [
+      8192,
+      8192,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      1,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "range_flattens": [
+      null,
+      false,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "",
+      "",
+      "last",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
       "pointer",
       "pointer",
       "tensor_descriptor",
+      "tensor_descriptor",
       "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_2048": {
+    "block_sizes": [
+      2048,
+      1024,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      1,
+      1,
+      0
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      true
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      false,
+      true
+    ],
+    "range_flattens": [
+      null,
+      null,
+      false,
+      false
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last",
+      "last",
+      "first",
+      "first",
+      "",
+      "first",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 4,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
       "tensor_descriptor"
     ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_2048": {
+    "block_sizes": [
+      4096,
+      4096,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      4,
+      1
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      true,
+      false
+    ],
+    "range_flattens": [
+      null,
+      true,
+      true,
+      true
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "last",
+      "",
+      "",
+      "last",
+      "",
+      "first",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 7,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_2048": {
@@ -2115,135 +2143,15 @@
     ],
     "range_unroll_factors": [
       0,
-      2,
-      4,
-      3
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      null
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      true,
-      true,
-      null
-    ],
-    "range_flattens": [
-      null,
-      true,
-      false,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "last",
-      "last",
-      "last",
-      "first",
-      "first",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 7,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_2048_num_tokens_4096": {
-    "block_sizes": [
-      1024,
-      1024,
-      512
-    ],
-    "range_unroll_factors": [
-      0,
-      3,
-      2,
-      4
-    ],
-    "range_warp_specializes": [
-      null,
-      null,
-      null,
-      false
-    ],
-    "range_num_stages": [],
-    "range_multi_buffers": [
-      null,
-      false,
-      true,
-      null
-    ],
-    "range_flattens": [
-      null,
-      true,
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "",
-      "last",
-      "last",
-      "",
-      "first",
-      "last",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "flat"
-  },
-  "hidden_size_4096_num_tokens_4096": {
-    "block_sizes": [
-      32,
-      4096,
-      512
-    ],
-    "range_unroll_factors": [
-      0,
       0,
       1,
-      1
+      0
     ],
     "range_warp_specializes": [
       null,
-      null,
       false,
-      null
+      null,
+      true
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
@@ -2254,23 +2162,145 @@
     ],
     "range_flattens": [
       null,
-      true,
-      true,
+      null,
+      false,
       null
     ],
     "load_eviction_policies": [
-      "first",
-      "first",
       "",
       "",
       "",
       "",
+      "",
+      "",
       "first",
-      "first",
+      "last",
       ""
     ],
     "num_warps": 1,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_4096": {
+    "block_sizes": [
+      2048,
+      2048,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      0,
+      3
+    ],
+    "range_warp_specializes": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      false,
+      false
+    ],
+    "range_flattens": [
+      null,
+      null,
+      false,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "first",
+      "last",
+      "",
+      "last",
+      "first",
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 4,
     "num_stages": 8,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_4096": {
+    "block_sizes": [
+      512,
+      2048,
+      512
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      1,
+      2
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      false,
+      null
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      false,
+      true
+    ],
+    "range_flattens": [
+      null,
+      true,
+      null,
+      true
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "",
+      "last",
+      "",
+      "last",
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
     "indexing": [
       "tensor_descriptor",
       "pointer",
@@ -2278,13 +2308,14 @@
       "pointer",
       "pointer",
       "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "pointer",
       "pointer"
     ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   },
   "hidden_size_8192_num_tokens_4096": {
@@ -2296,55 +2327,239 @@
     "range_unroll_factors": [
       0,
       4,
-      4,
-      2
+      3,
+      3
     ],
     "range_warp_specializes": [
       null,
       false,
       null,
-      null
+      false
     ],
     "range_num_stages": [],
     "range_multi_buffers": [
       null,
       true,
-      false,
-      null
+      null,
+      true
     ],
     "range_flattens": [
       null,
-      false,
       true,
-      false
+      false,
+      null
     ],
     "load_eviction_policies": [
       "",
-      "first",
-      "",
-      "",
+      "last",
       "first",
       "first",
-      "",
       "first",
-      "last"
+      "last",
+      "first",
+      "last",
+      ""
     ],
     "num_warps": 8,
-    "num_stages": 5,
+    "num_stages": 4,
     "indexing": [
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
       "tensor_descriptor",
-      "tensor_descriptor",
+      "pointer",
       "tensor_descriptor",
       "tensor_descriptor",
       "pointer",
       "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_num_tokens_8192": {
+    "block_sizes": [
+      2048,
+      2048,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      2,
+      0,
+      3
+    ],
+    "range_warp_specializes": [
+      null,
+      null,
+      true,
+      null
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      true,
+      false
+    ],
+    "range_flattens": [
+      null,
+      true,
+      true,
+      true
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "last",
+      "",
+      "last",
+      "",
+      "first",
+      "",
+      "last"
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
       "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
       "pointer"
     ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_num_tokens_8192": {
+    "block_sizes": [
+      4096,
+      4096,
+      1024
+    ],
+    "range_unroll_factors": [
+      0,
+      0,
+      1,
+      3
+    ],
+    "range_warp_specializes": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      null,
+      false,
+      null
+    ],
+    "range_flattens": [
+      null,
+      true,
+      null,
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "last",
+      "",
+      "",
+      "last",
+      "last",
+      "last",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_num_tokens_8192": {
+    "block_sizes": [
+      8192,
+      8192,
+      2048
+    ],
+    "range_unroll_factors": [
+      0,
+      4,
+      3,
+      3
+    ],
+    "range_warp_specializes": [
+      null,
+      false,
+      null,
+      false
+    ],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null,
+      true,
+      null,
+      false
+    ],
+    "range_flattens": [
+      null,
+      true,
+      true,
+      false
+    ],
+    "load_eviction_policies": [
+      "last",
+      "last",
+      "last",
+      "last",
+      "",
+      "",
+      "last",
+      "first",
+      "last"
+    ],
+    "num_warps": 8,
+    "num_stages": 5,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "atomic_indexing": [],
     "pid_type": "flat"
   }
 }
