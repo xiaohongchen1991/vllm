@@ -172,7 +172,7 @@ class SiluMulDynamicPerTokenQuantPattern(ActivationQuantPattern):
                 scale_ub=None,
             )
             
-            return at[1], at[2]
+            return at[1], at[3]
 
         register_replacement(
             pattern,
