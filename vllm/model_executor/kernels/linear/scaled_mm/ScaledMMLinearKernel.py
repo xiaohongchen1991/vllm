@@ -122,6 +122,7 @@ class FP8ScaledMMLinearKernel(
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        use_helion: bool = False,
     ) -> torch.Tensor:
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
@@ -139,11 +140,18 @@ class FP8ScaledMMLinearKernel(
         # TODO(luka) remove this path if not used anymore
         x_2d_q = x_2d
         if x.dtype != fp8_dtype:
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-                x_s_ub,
-            )
+            if use_helion:
+                x_2d_q, x_s = self.quant_fp8.forward_cuda(
+                    x_2d,
+                    x_s,
+                    x_s_ub,
+                )
+            else:
+                x_2d_q, x_s = self.quant_fp8.forward_native(
+                    x_2d,
+                    x_s,
+                    x_s_ub,
+                )
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,

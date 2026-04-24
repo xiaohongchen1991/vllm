@@ -183,7 +183,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
             self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_fused_add_op()
 
     def inputs(self) -> list[torch.Tensor]:
-        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
+        input = self.empty(5, 16)
         weight = self.empty(16)
         residual = self.empty(5, 16)
         return [input, weight, residual]
@@ -242,6 +242,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         if enabled is None:
             enabled = QuantFP8.enabled()
 
+        enabled = True
         super().__init__(enabled)
         self.quant_key = quant_key
         self.has_col_major_scales = has_col_major_scales

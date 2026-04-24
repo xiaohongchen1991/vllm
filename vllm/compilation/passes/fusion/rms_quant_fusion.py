@@ -253,7 +253,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(
@@ -571,7 +571,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
@@ -663,7 +663,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
+        logger.info("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> str:
         return self.hash_source(

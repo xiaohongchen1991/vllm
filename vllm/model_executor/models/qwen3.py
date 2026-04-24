@@ -147,7 +147,7 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states, use_helion=True)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
@@ -158,7 +158,7 @@ class Qwen3Attention(nn.Module):
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        output, _ = self.o_proj(attn_output, use_helion=True)
         return output
 
 
