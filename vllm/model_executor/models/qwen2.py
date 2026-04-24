@@ -111,9 +111,9 @@ class Qwen2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        gate_up, _ = self.gate_up_proj(x, use_helion=True)
         x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
+        x, _ = self.down_proj(x, use_helion=True)
         return x
 
 
