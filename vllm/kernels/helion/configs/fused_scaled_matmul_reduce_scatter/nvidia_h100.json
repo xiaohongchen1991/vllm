@@ -1,0 +1,58 @@
+{
+  "hidden_size_2048_feature_size_2048_num_tokens_32": {
+    "block_sizes": [
+      16,
+      64,
+      128
+    ],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      4
+    ],
+    "range_unroll_factors": [
+      2,
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_multi_buffers": [
+      null,
+      null
+    ],
+    "range_flattens": [
+      false,
+      false
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "",
+      "",
+      "first",
+      "",
+      "first",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 3,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "atomic_indexing": [],
+    "pid_type": "persistent_interleaved",
+    "num_sm_multiplier": 128
+  }
+}
