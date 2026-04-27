@@ -20,10 +20,13 @@ from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherRotaryEmbedding
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
-
+from vllm.kernels.helion.ops.fused_qk_norm_rope import (
+    fused_qk_norm_rope,
+)
+test = fused_qk_norm_rope
 logger = init_logger(__name__)
-
-FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+# FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
+FUSED_QK_ROPE_OP = torch.ops.vllm_helion.fused_qk_norm_rope.default
 
 P = ParamSpec("P")
 
