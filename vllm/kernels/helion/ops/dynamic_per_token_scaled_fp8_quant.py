@@ -30,8 +30,10 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all input
     # property combination. Currently, dtypes are fixed. We need optimization to
     # bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-    hidden_size_list = [512, 2048, 4096, 6144, 8192, 12288, 28672]
+    # num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    # hidden_size_list = [512, 2048, 4096, 5120, 6144, 8192, 12288, 28672]
+    num_tokens_list = [16384]
+    hidden_size_list = [2048, 4096]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
@@ -149,10 +151,22 @@ def dynamic_per_token_scaled_fp8_quant(
             result[tile_m, tile_n] = y_blk.clamp(fp8_min, fp8_max).to(result.dtype)
 
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
+from vllm.config import VllmConfig, set_current_vllm_config
+
+config = VllmConfig()
+with set_current_vllm_config(config):
+    layer = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+    compiled_layer = torch.compile(layer.forward_native)
+
 def baseline(
     result: torch.Tensor,  # [num_tokens, hidden_size]
     input: torch.Tensor,  # [num_tokens, hidden_size]
     scale: torch.Tensor,  # [num_tokens, 1]
     scale_ub: torch.Tensor | None = None,  # scalar tensor
 ) -> None:
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant(result, input, scale, scale_ub)
+    compiled_layer(input, None, scale_ub)
+    # torch.ops._C.dynamic_per_token_scaled_fp8_quant(result, input, scale, scale_ub)

@@ -44,8 +44,10 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-    hidden_size_list = [2048, 4096, 8192]
+    # num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    # hidden_size_list = [2048, 4096, 5120]
+    num_tokens_list = [16384]
+    hidden_size_list = [2048, 4096]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
@@ -222,6 +224,37 @@ def rms_norm_dynamic_per_token_quant(
                 result.dtype
             )
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.config import VllmConfig, set_current_vllm_config
+import torch.nn as nn
+
+class Layer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+
+    def forward(
+        self,
+        result: torch.Tensor,  # [num_tokens, hidden_size]
+        input: torch.Tensor,  # [num_tokens, hidden_size]
+        weight: torch.Tensor,  # [num_tokens]
+        scale: torch.Tensor,  # [num_tokens, 1]
+        epsilon: float,
+        scale_ub: torch.Tensor | None = None,  # []
+        residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        result_rms, residual = RMSNorm.forward_static(input, epsilon, input.size(-1), input.dtype, weight, residual)
+        result, scale = self.fp8.forward_native(result_rms, None)
+        return result, residual, scale
+        
+config = VllmConfig()
+with set_current_vllm_config(config):
+    layer = Layer()
+    compiled_layer = torch.compile(layer.forward)
 
 def baseline(
     result: torch.Tensor,  # [num_tokens, hidden_size]
@@ -232,6 +265,7 @@ def baseline(
     scale_ub: torch.Tensor | None = None,  # []
     residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
 ) -> None:
-    torch.ops._C.rms_norm_dynamic_per_token_quant(
-        result, input, weight, scale, epsilon, scale_ub, residual
-    )
+    # torch.ops._C.rms_norm_dynamic_per_token_quant(
+    #     result, input, weight, scale, epsilon, scale_ub, residual
+    # )
+    compiled_layer(result, input, weight, scale, epsilon, scale_ub, residual)
