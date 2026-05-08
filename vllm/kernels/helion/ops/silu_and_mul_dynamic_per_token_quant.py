@@ -42,7 +42,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all input
     # property combination. Currently, dtypes are fixed. We need optimization to
     # bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
     intermediate_size_list = [6144, 12288, 25600]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
@@ -216,8 +216,8 @@ def baseline(
     input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
     scale: torch.Tensor,  # [num_tokens, 1]
     scale_ub: torch.Tensor | None = None,  # scalar tensor
-) -> None:
-    out, scale_out = compiled_layer(result, input, scale, scale_ub)
+):
+    return compiled_layer(result, input, scale, scale_ub)
     # silu_and_mul_out = SiluAndMul.forward_native(input)
     # out, scale_out = ops.scaled_fp8_quant(silu_and_mul_out, scale=None, scale_ub=scale_ub, use_per_token_if_dynamic=True)
     # result.copy_(out)

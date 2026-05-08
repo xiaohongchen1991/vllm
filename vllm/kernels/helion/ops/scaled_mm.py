@@ -43,21 +43,21 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
         (4096, 24576),
         (12288, 4096),
 
-        # Qwen3.5-35B-A3B
-        (2048, 1024),
-        (512, 2048),
-        (2048, 9216),
-        (4096, 2048),
+        # Qwen3-32B
+        (5120, 10240),
+        (5120, 5120),
+        (5120, 51200),
+        (25600, 5120),
 
         # Meta-Llama-3.3-70B
-        (8192, 10240),
-        (8192, 8192),
-        (8192, 57344),
-        (28672, 8192),
-        (8192, 5120),
-        (4096, 8192),
-        (8192, 28672),
-        (14336, 8192),
+        # (8192, 10240),
+        # (8192, 8192),
+        # (8192, 57344),
+        # (28672, 8192),
+        # (8192, 5120),
+        # (4096, 8192),
+        # (8192, 28672),
+        # (14336, 8192),
     ]
 
     in_dtype: torch.dtype = current_platform.fp8_dtype()
@@ -207,6 +207,7 @@ def scaled_mm(
     assert scale_a.dtype == scale_b.dtype and scale_a.is_floating_point()
     assert scale_a.shape[1] == 1 and (scale_a.shape[0] == 1 or scale_a.shape[0] == M)
     assert scale_b.shape[1] == 1 and (scale_b.shape[0] == 1 or scale_b.shape[0] == N)
+    hl.specialize(scale_b.shape[1])
     assert out_dtype.is_floating_point
 
     if bias is not None:
@@ -226,12 +227,20 @@ def scaled_mm(
             )
 
         acc = acc.to(torch.float32)
-        scale_a_mask = (tile_m.index < scale_a.shape[0])[:, None]
-        scale_a_blk = torch.where(scale_a_mask, scale_a[tile_m, :], scale_a[0, 0])
+        # scale_a_mask = (tile_m.index < scale_a.shape[0])[:, None]
+        # scale_a_blk = torch.where(scale_a_mask, scale_a[tile_m, :], scale_a[0, 0])
+        if scale_a.shape[0] == M:
+            scale_a_blk = scale_a[tile_m, :]
+        else:
+            scale_a_blk = scale_a[0, 0].expand(tile_m.block_size, 1)
         acc = scale_a_blk * acc
 
-        scale_b_mask = (tile_n.index < scale_b.shape[0])[:, None]
-        scale_b_blk = torch.where(scale_b_mask, scale_b[tile_n, :], scale_b[0, 0])
+        # scale_b_mask = (tile_n.index < scale_b.shape[0])[:, None]
+        # scale_b_blk = torch.where(scale_b_mask, scale_b[tile_n, :], scale_b[0, 0])
+        if scale_b.shape[0] == N:
+            scale_b_blk = scale_b[tile_n, :]
+        else:
+            scale_b_blk = scale_b[0, 0].expand(tile_n.block_size, 1)
         acc = scale_b_blk.T * acc
 
         c_blk = acc.to(out_dtype)

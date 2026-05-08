@@ -44,9 +44,9 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [2048, 4096, 8192]
-    group_size_list = [64, 128]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    hidden_size_list = [2048, 4096, 5120]
+    group_size_list = [128]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
@@ -63,6 +63,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
             dtype=scale_dtype,
         )
         scale_ub = torch.mean(input).to(scale_dtype)
+        # scale_ub = None
         residual = torch.randn_like(input)
         weight = torch.normal(
             mean=1.0,
@@ -110,7 +111,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
     if not config_keys:
         return None
 
-    _, input, _, _, _, _, _, group_size, _ = args
+    _, input, _, _, _, _, _, group_size, *_ = args
     num_tokens, hidden_size = input.shape
 
     configs: dict[int, dict[int, list[int]]] = {}
@@ -146,11 +147,25 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
         f"{best_group_size}_num_tokens_{best_num_tokens}"
     )
 
+def fake_impl(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [hidden_size]
+    scale: torch.Tensor,  # [num_tokens, groups_per_row]
+    epsilon: float,
+    scale_ub: torch.Tensor,  # []
+    residual: torch.Tensor,  # [num_tokens, hidden_size]
+    group_size: int,
+    scale_ue8m0: bool,
+    is_scale_transposed: bool,  # dummy
+) -> None:
+    return
 
 @register_kernel(
     mutates_args=["result", "scale", "residual"],
     config_picker=pick_config,
     input_generator=generate_inputs,
+    fake_impl=fake_impl,
     helion_settings=helion.Settings(
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
@@ -164,6 +179,7 @@ def rms_norm_per_block_quant(
     scale_ub: torch.Tensor,  # []
     residual: torch.Tensor,  # [num_tokens, hidden_size]
     group_size: int,
+    scale_ue8m0: bool,
     is_scale_transposed: bool,  # dummy
 ) -> None:
     # This code assumes batch_dim and num_tokens are flattened
@@ -220,9 +236,9 @@ def rms_norm_per_block_quant(
         m_idx = tile_m.begin + hl.arange(tile_m.block_size)
         # shape: [tile_m, 1, 1]
         m_blk = m_idx[:, None, None]
-        for tile_gn in hl.tile(groups_per_row):
+        for tile_gn, tile_n in hl.tile([groups_per_row, group_size], block_size=[None, group_size]):
             gn_idx = tile_gn.index
-            n_offset = hl.arange(group_size)
+            n_offset = tile_n.index
             n_idx = gn_idx[:, None] * group_size + n_offset[None, :]
             # shape: [1, tile_gn, groups_per_row]
             n_blk = n_idx[None, :, :]
@@ -247,6 +263,9 @@ def rms_norm_per_block_quant(
             s_blk = s_blk * (1.0 / qtype_max)
             s_blk = s_blk.clamp(min=min_scaling_factor)
 
+            if scale_ue8m0:
+                s_blk = torch.exp2(torch.ceil(torch.log2(s_blk)))
+
             scale[tile_m, tile_gn] = s_blk
 
             if quant_dtype == torch.int8:
@@ -263,6 +282,40 @@ def rms_norm_per_block_quant(
                     residual, [m_blk, n_blk], x_blk.to(residual.dtype), extra_mask=mask
                 )
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.config import VllmConfig, set_current_vllm_config
+import torch.nn as nn
+
+class Layer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        group_shape = GroupShape(1, 128)
+        self.fp8 = QuantFP8(static=False, group_shape=group_shape)
+
+    def forward(
+        self,
+        result: torch.Tensor,  # [num_tokens, hidden_size]
+        input: torch.Tensor,  # [num_tokens, hidden_size]
+        weight: torch.Tensor,  # [hidden_size]
+        scale: torch.Tensor,  # [num_tokens, groups_per_row]
+        epsilon: float,
+        scale_ub: torch.Tensor,  # []
+        residual: torch.Tensor,  # [num_tokens, hidden_size]
+        group_size: int,
+        is_scale_transposed: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        result_rms, residual = RMSNorm.forward_static(input, epsilon, input.size(-1), input.dtype, weight, residual)
+        result, scale = self.fp8.forward_native(result_rms, None)
+        return result, residual, scale
+        
+config = VllmConfig()
+with set_current_vllm_config(config):
+    layer = Layer()
+    compiled_layer = torch.compile(layer.forward)
 
 def baseline(
     result: torch.Tensor,  # [num_tokens, hidden_size]
@@ -274,15 +327,32 @@ def baseline(
     residual: torch.Tensor,  # [num_tokens, hidden_size]
     group_size: int,
     is_scale_transposed: bool,
-) -> None:
-    torch.ops._C.rms_norm_per_block_quant(
-        result,
-        input,
-        weight,
-        scale,
-        epsilon,
-        scale_ub,
-        residual,
-        group_size,
-        is_scale_transposed,
-    )
+):
+    return compiled_layer(result, input, weight, scale, epsilon, scale_ub, residual, group_size, is_scale_transposed)
+    # torch.ops._C.rms_norm_per_block_quant(
+    #     result,
+    #     input,
+    #     weight,
+    #     scale,
+    #     epsilon,
+    #     scale_ub,
+    #     residual,
+    #     group_size,
+    #     is_scale_transposed,
+    # )
+
+def helion_kernel(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [hidden_size]
+    scale: torch.Tensor,  # [num_tokens, groups_per_row]
+    epsilon: float,
+    scale_ub: torch.Tensor,  # []
+    residual: torch.Tensor,  # [num_tokens, hidden_size]
+    group_size: int,
+    is_scale_transposed: bool,
+):
+    result = torch.empty(result.shape, device=input.device, dtype=result.dtype)
+    scale = torch.empty(scale.shape, device=input.device, dtype=scale.dtype)
+    rms_norm_per_block_quant(result, input, weight, scale, epsilon, scale_ub, residual, group_size, is_scale_transposed)
+    return result, residual, scale

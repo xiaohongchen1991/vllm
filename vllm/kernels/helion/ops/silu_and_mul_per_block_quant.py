@@ -42,10 +42,10 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all input
     # property combination. Currently, dtypes are fixed. We need optimization to
     # bucket/skip some combinations
-    # num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-    # intermediate_size_list = [6144, 12288, 25600]
-    num_tokens_list = [32]
-    intermediate_size_list = [12288]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    intermediate_size_list = [6144, 12288, 25600]
+    # num_tokens_list = [32]
+    # intermediate_size_list = [12288]
 
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
@@ -113,6 +113,7 @@ def fake_impl(
     input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
     scales: torch.Tensor,  # [num_tokens, groups_per_row]
     group_size: int,
+    scale_ue8m0: bool,
     scale_ub: torch.Tensor | None = None,  # scalar tensor
     is_scale_transposed: bool = False,
 ) -> None:
@@ -133,6 +134,7 @@ def silu_and_mul_per_block_quant(
     input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
     scales: torch.Tensor,  # [num_tokens, groups_per_row]
     group_size: int,
+    scale_ue8m0: bool,
     scale_ub: torch.Tensor | None = None,  # scalar tensor
     is_scale_transposed: bool = False, # dummy
 ) -> None:
@@ -192,6 +194,8 @@ def silu_and_mul_per_block_quant(
             s_blk = s_blk.clamp(max=scale_ub_s)
         s_blk = s_blk * (1.0 / qtype_max)
         s_blk = s_blk.clamp(min=min_scaling_factor)
+        if scale_ue8m0:
+            s_blk = torch.exp2(torch.ceil(torch.log2(s_blk)))
 
         scales[tile_m, tile_gn] = s_blk
         if quant_dtype == torch.int8:
@@ -242,8 +246,8 @@ def baseline(
     group_size: int,
     scale_ub: torch.Tensor | None = None,  # scalar tensor
     is_scale_transposed: bool = False,
-) -> None:
-    out, scale_out = compiled_layer(out, input, scales, group_size)
+):
+    return compiled_layer(out, input, scales, group_size)
     # torch.ops._C.silu_and_mul_per_block_quant(
     #     out,
     #     input,
@@ -255,11 +259,14 @@ def baseline(
 
 
 def helion_kernel(
-    result: torch.Tensor,  # [num_tokens, intermediate_size]
+    out: torch.Tensor,  # [num_tokens, intermediate_size]
     input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
-    scale: torch.Tensor,  # [num_tokens, 1]
+    scales: torch.Tensor,  # [num_tokens, groups_per_row]
+    group_size: int,
     scale_ub: torch.Tensor | None = None,  # scalar tensor
+    is_scale_transposed: bool = False,
 ) -> None:
-    result = torch.empty(result.shape, device=input.device, dtype=result.dtype)
-    scale = torch.empty(scale.shape, device=input.device, dtype=scale.dtype)
-    silu_and_mul_dynamic_per_token_quant(result, input, scale, scale_ub)
+    out = torch.empty(out.shape, device=input.device, dtype=out.dtype)
+    scales = torch.empty(scales.shape, device=input.device, dtype=scales.dtype)
+    silu_and_mul_per_block_quant(out, input, scales, group_size, scale_ub, is_scale_transposed)
+    return out, scales

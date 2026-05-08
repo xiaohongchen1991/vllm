@@ -30,9 +30,9 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [2048, 4096, 6144, 8192, 12288]
-    group_size_list = [64, 128]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    hidden_size_list = [2048, 4096, 5120]
+    group_size_list = [128]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
@@ -67,6 +67,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
             fp8_max,
             use_ue8m0,
             column_major,
+            False,
         )
 
     return inputs
@@ -127,11 +128,27 @@ def pick_config(args: tuple[Any, ...], config_keys: list[str]) -> str | None:
         f"{best_group_size}_num_tokens_{best_num_tokens}"
     )
 
+def fake_impl(
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    output_q: torch.Tensor,  # [num_tokens, hidden_size]
+    output_s: torch.Tensor,  # [num_tokens, groups_per_row]
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    scale_ue8m0: bool,
+    # Unused dummy args
+    # Kept for consistency with existing kernel interface
+    dummy_is_scale_transposed: bool = False,
+    dummy_is_tma_aligned: bool = False,
+) -> None:
+    return
 
 @register_kernel(
     mutates_args=["output_q", "output_s"],
     config_picker=pick_config,
     input_generator=generate_inputs,
+    fake_impl=fake_impl,
 )  # type: ignore[misc]
 def per_token_group_fp8_quant(
     input: torch.Tensor,  # [num_tokens, hidden_size]
@@ -158,19 +175,10 @@ def per_token_group_fp8_quant(
     assert hidden_size % group_size == 0 and hidden_size // group_size == groups_per_row
     assert output_s.ndim == 2 and output_s.dtype == torch.float32
 
-    for tile_m, tile_gn in hl.tile([num_tokens, groups_per_row], block_size=[1, None]):
-        m_idx = tile_m.begin + hl.arange(tile_m.block_size)
-        gn_idx = tile_gn.index
-        n_offset = hl.arange(group_size)
-        n_idx = gn_idx[:, None] * group_size + n_offset[None, :]
-        gn_mask = gn_idx < groups_per_row
-
-        # shape: [tile_m, tile_gn, group_size]
-        x_blk = hl.load(
-            input,
-            [m_idx[:, None, None], n_idx[None, :, :]],
-            extra_mask=gn_mask[None, :, None],
-        ).to(dtype=torch.float32)
+    input = input.view(num_tokens, -1, group_size)
+    output_q = output_q.view(num_tokens, -1, group_size)
+    for tile_m, tile_gn, tile_n in hl.tile([num_tokens, groups_per_row, group_size], block_size=[1, None, group_size]):
+        x_blk = input[tile_m, tile_gn, tile_n]
         y_s_blk = torch.clamp(torch.amax(torch.abs(x_blk), dim=-1), min=eps)
         y_s_blk = y_s_blk / fp8_max
 
@@ -181,20 +189,21 @@ def per_token_group_fp8_quant(
             output_q.dtype
         )
 
-        # output_s[tile_m, tile_gn] = y_s_blk
-        hl.store(
-            output_s,
-            [m_idx[:, None], gn_idx[None, :]],
-            y_s_blk,
-            extra_mask=gn_mask[None, :],
-        )
-        hl.store(
-            output_q,
-            [m_idx[:, None, None], n_idx[None, :, :]],
-            y_q_blk,
-            extra_mask=gn_mask[None, :, None],
-        )
+        output_s[tile_m, tile_gn] = y_s_blk
+        output_q[tile_m, tile_gn, tile_n] = y_q_blk
 
+
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
+from vllm.config import VllmConfig, set_current_vllm_config
+
+config = VllmConfig()
+with set_current_vllm_config(config):
+    group_shape = GroupShape(1, 128)
+    layer = QuantFP8(static=False, group_shape=group_shape)
+    compiled_layer = torch.compile(layer.forward_native)
 
 def baseline(
     input: torch.Tensor,  # [num_tokens, hidden_size]
@@ -208,15 +217,32 @@ def baseline(
     dummy_is_scale_transposed: bool = False,
     dummy_is_tma_aligned: bool = False,
 ) -> None:
-    torch.ops._C.per_token_group_fp8_quant(
-        input,
-        output_q,
-        output_s,
-        group_size,
-        eps,
-        fp8_min,
-        fp8_max,
-        scale_ue8m0,
-        dummy_is_scale_transposed,
-        dummy_is_tma_aligned,
-    )
+    return compiled_layer(input, None)
+    # torch.ops._C.per_token_group_fp8_quant(
+    #     input,
+    #     output_q,
+    #     output_s,
+    #     group_size,
+    #     eps,
+    #     fp8_min,
+    #     fp8_max,
+    #     scale_ue8m0,
+    #     dummy_is_scale_transposed,
+    #     dummy_is_tma_aligned,
+    # )
+
+def helion_kernel(
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    output_q: torch.Tensor,  # [num_tokens, hidden_size]
+    output_s: torch.Tensor,  # [num_tokens, groups_per_row]
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    scale_ue8m0: bool,
+    dummy_is_scale_transposed: bool = False,
+    dummy_is_tma_aligned: bool = False,
+) -> None:
+    output_q = torch.empty(output_q.shape, device=input.device, dtype=output_q.dtype)
+    output_s = torch.empty(output_s.shape, device=input.device, dtype=output_s.dtype)
+    per_token_group_fp8_quant(input, output_q, output_s, group_size, eps, fp8_min, fp8_max, scale_ue8m0, dummy_is_scale_transposed, dummy_is_tma_aligned)

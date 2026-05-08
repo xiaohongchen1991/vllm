@@ -943,7 +943,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-        use_helion: bool = False,
     ):
         """
         Use the output of create_weights and the CompressedTensorsScheme
@@ -954,7 +953,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")
-        return scheme.apply_weights(layer, x, bias=bias, use_helion=use_helion)
+        return scheme.apply_weights(layer, x, bias=bias)
 
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):

@@ -34,6 +34,9 @@ from vllm.utils.deep_gemm import (
     transform_sf_into_required_layout,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.kernels.helion.ops.per_token_group_fp8_quant import (
+    per_token_group_fp8_quant,
+)
 
 logger = init_logger(__name__)
 
@@ -419,7 +422,7 @@ def per_token_group_quant_fp8(
     # prefer CUDA kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
     if current_platform.is_cuda() and x.is_contiguous():
-        torch.ops._C.per_token_group_fp8_quant(
+        torch.ops.vllm_helion.per_token_group_fp8_quant(
             x,
             x_q,
             x_s,
@@ -431,6 +434,18 @@ def per_token_group_quant_fp8(
             column_major_scales,
             tma_aligned_scales,
         )
+        # torch.ops._C.per_token_group_fp8_quant(
+        #     x,
+        #     x_q,
+        #     x_s,
+        #     group_size,
+        #     eps,
+        #     fp8_min,
+        #     fp8_max,
+        #     use_ue8m0,
+        #     column_major_scales,
+        #     tma_aligned_scales,
+        # )
         return x_q, x_s
 
     # TRITON FALLBACK

@@ -13,12 +13,12 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
-from vllm.kernels.helion.ops.scaled_mm import (
-    scaled_mm,
-)
-from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import (
-    dynamic_per_token_scaled_fp8_quant,
-)
+# from vllm.kernels.helion.ops.scaled_mm import (
+#     scaled_mm,
+# )
+# from vllm.kernels.helion.ops.dynamic_per_token_scaled_fp8_quant import (
+#     dynamic_per_token_scaled_fp8_quant,
+# )
 
 logger = init_logger(__name__)
 

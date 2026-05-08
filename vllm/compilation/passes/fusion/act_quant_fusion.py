@@ -51,7 +51,7 @@ if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
 if current_platform.is_cuda_alike():
-    FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
+    FUSED_OPS[kFp8Dynamic128Sym] = torch.ops.vllm_helion.silu_and_mul_per_block_quant.default
     FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
 
 
@@ -323,6 +323,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
                 input=input,
                 scales=scale,
                 group_size=self.group_size,
+                scale_ue8m0=self.is_e8m0,
                 scale_ub=None,
                 is_scale_transposed=is_scale_transposed,
             )

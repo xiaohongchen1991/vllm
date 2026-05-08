@@ -194,6 +194,5 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-        use_helion: bool = False,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply_weights(layer, x, bias, use_helion)
+        return self.fp8_linear.apply_weights(layer, x, bias)

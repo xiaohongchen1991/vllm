@@ -44,10 +44,10 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    # num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
-    # hidden_size_list = [2048, 4096, 5120]
-    num_tokens_list = [16384]
-    hidden_size_list = [2048, 4096]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    hidden_size_list = [2048, 4096, 5120]
+    # num_tokens_list = [16384]
+    # hidden_size_list = [2048, 4096]
     in_dtype: torch.dtype = torch.bfloat16
     out_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
@@ -264,8 +264,22 @@ def baseline(
     epsilon: float,
     scale_ub: torch.Tensor | None = None,  # []
     residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
-) -> None:
+):
     # torch.ops._C.rms_norm_dynamic_per_token_quant(
     #     result, input, weight, scale, epsilon, scale_ub, residual
     # )
-    compiled_layer(result, input, weight, scale, epsilon, scale_ub, residual)
+    return compiled_layer(result, input, weight, scale, epsilon, scale_ub, residual)
+
+def helion_kernel(
+    result: torch.Tensor,  # [num_tokens, hidden_size]
+    input: torch.Tensor,  # [num_tokens, hidden_size]
+    weight: torch.Tensor,  # [num_tokens]
+    scale: torch.Tensor,  # [num_tokens, 1]
+    epsilon: float,
+    scale_ub: torch.Tensor | None = None,  # []
+    residual: torch.Tensor | None = None,  # [num_tokens, hidden_size]
+):
+    result = torch.empty(result.shape, device=input.device, dtype=result.dtype)
+    scale = torch.empty(scale.shape, device=input.device, dtype=scale.dtype)
+    rms_norm_dynamic_per_token_quant(result, input, weight, scale, epsilon, scale_ub, residual)
+    return result, residual, scale

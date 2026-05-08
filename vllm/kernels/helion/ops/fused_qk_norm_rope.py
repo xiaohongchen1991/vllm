@@ -46,7 +46,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+    num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
     # num_tokens_list = [32]
     num_heads_pair = [
         # Qwen3-1.7B
@@ -314,7 +314,8 @@ class Layer(nn.Module):
         k_by_head = RMSNorm.forward_static(k_by_head, eps, head_dim, qkv.dtype, k_weight)
         k = k_by_head.view(k.shape)
 
-        return RotaryEmbedding.forward_static(position_ids, q, k, head_dim, cos_sin_cache.shape[1], cos_sin_cache, is_neox)
+        q, k =  RotaryEmbedding.forward_static(position_ids, q, k, head_dim, cos_sin_cache.shape[1], cos_sin_cache, is_neox)
+        return q, k, v
         
 
 config = VllmConfig()
@@ -336,110 +337,126 @@ def baseline(
     is_neox: bool,
     position_ids: torch.Tensor, # [num_tokens],
     forced_token_heads_per_warp: int = -1, # dummy
-) -> None:
-    # q, k = compiled_layer(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids)
-    torch.ops._C.fused_qk_norm_rope(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids)
-    
+):
+    return compiled_layer(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids)
+    # torch.ops._C.fused_qk_norm_rope(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids)
     
 
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.utils.torch_utils import set_random_seed
-
-def _apply_qk_norm_rope(
-    qkv: torch.Tensor,
-    positions: torch.Tensor,
-    q_norm: RMSNorm,
-    k_norm: RMSNorm,
-    rope: RotaryEmbedding,
+def helion_kernel(
+    qkv: torch.Tensor, # [num_tokens, (num_heads_q+num_heads_k+num_heads_v)*head_dim]
     num_heads_q: int,
-    num_heads_kv: int,
+    num_heads_k: int,
+    num_heads_v: int,
     head_dim: int,
-) -> torch.Tensor:
-    q_size = num_heads_q * head_dim
-    kv_size = num_heads_kv * head_dim
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor, # [max_position, rotary_dim]
+    is_neox: bool,
+    position_ids: torch.Tensor, # [num_tokens],
+    forced_token_heads_per_warp: int = -1, # dummy
+):
+    fused_qk_norm_rope(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids, forced_token_heads_per_warp)
+    return qkv.split([num_heads_q*head_dim, num_heads_k*head_dim, num_heads_v*head_dim], dim=-1)
 
-    q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+# from vllm.model_executor.layers.layernorm import RMSNorm
+# from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+# from vllm.config import VllmConfig, set_current_vllm_config
+# from vllm.utils.torch_utils import set_random_seed
 
-    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
-    q_by_head = q_norm.forward_native(q_by_head)
-    q = q_by_head.view(q.shape)
+# def _apply_qk_norm_rope(
+#     qkv: torch.Tensor,
+#     positions: torch.Tensor,
+#     q_norm: RMSNorm,
+#     k_norm: RMSNorm,
+#     rope: RotaryEmbedding,
+#     num_heads_q: int,
+#     num_heads_kv: int,
+#     head_dim: int,
+# ) -> torch.Tensor:
+#     q_size = num_heads_q * head_dim
+#     kv_size = num_heads_kv * head_dim
 
-    k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
-    k_by_head = k_norm.forward_native(k_by_head)
-    k = k_by_head.view(k.shape)
+#     q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
 
-    q, k = rope.forward_native(positions, q, k)
-    return torch.cat([q, k, v], dim=-1)
+#     q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
+#     q_by_head = q_norm.forward_native(q_by_head)
+#     q = q_by_head.view(q.shape)
+
+#     k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
+#     k_by_head = k_norm.forward_native(k_by_head)
+#     k = k_by_head.view(k.shape)
+
+#     q, k = rope.forward_native(positions, q, k)
+#     return torch.cat([q, k, v], dim=-1)
 
 
-@torch.inference_mode()
-def test():
-    device = "cuda"
-    torch.set_default_device(device)
-    set_random_seed(13)
-    num_heads, num_kv_heads, head_dim = 32, 8, 128
-    num_tokens = 32
-    dtype = torch.bfloat16
-    rotary_ratio = 1.0
-    is_neox = True
-    eps = 1e-5
+# @torch.inference_mode()
+# def test():
+#     device = "cuda"
+#     torch.set_default_device(device)
+#     set_random_seed(13)
+#     num_heads, num_kv_heads, head_dim = 32, 8, 128
+#     num_tokens = 32
+#     dtype = torch.bfloat16
+#     rotary_ratio = 1.0
+#     is_neox = True
+#     eps = 1e-5
 
-    total_dim = (num_heads + 2 * num_kv_heads) * head_dim
-    qkv_base = torch.randn(num_tokens, total_dim, dtype=dtype, device=device)
-    qkv_fused = qkv_base.clone()
-    positions = torch.arange(num_tokens, dtype=torch.long, device=device)
+#     total_dim = (num_heads + 2 * num_kv_heads) * head_dim
+#     qkv_base = torch.randn(num_tokens, total_dim, dtype=dtype, device=device)
+#     qkv_fused = qkv_base.clone()
+#     positions = torch.arange(num_tokens, dtype=torch.long, device=device)
 
-    q_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
-    k_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
-    q_norm.weight.data.normal_(mean=1.0, std=0.1)
-    k_norm.weight.data.normal_(mean=1.0, std=0.1)
-    q_weight = q_norm.weight.data
-    k_weight = k_norm.weight.data
-    rotary_dim = int(head_dim * rotary_ratio)
-    rope = RotaryEmbedding(
-        head_size=head_dim,
-        rotary_dim=rotary_dim,
-        max_position_embeddings=4096,
-        base=10000.0,
-        is_neox_style=is_neox,
-        dtype=dtype,
-    ).to(device)
+#     q_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
+#     k_norm = RMSNorm(head_dim, eps=eps).to(device=device, dtype=dtype)
+#     q_norm.weight.data.normal_(mean=1.0, std=0.1)
+#     k_norm.weight.data.normal_(mean=1.0, std=0.1)
+#     q_weight = q_norm.weight.data
+#     k_weight = k_norm.weight.data
+#     rotary_dim = int(head_dim * rotary_ratio)
+#     rope = RotaryEmbedding(
+#         head_size=head_dim,
+#         rotary_dim=rotary_dim,
+#         max_position_embeddings=4096,
+#         base=10000.0,
+#         is_neox_style=is_neox,
+#         dtype=dtype,
+#     ).to(device)
 
-    ref_result = _apply_qk_norm_rope(
-        qkv=qkv_base,
-        positions=positions,
-        q_norm=q_norm,
-        k_norm=k_norm,
-        rope=rope,
-        num_heads_q=num_heads,
-        num_heads_kv=num_kv_heads,
-        head_dim=head_dim,
-    )
+#     ref_result = _apply_qk_norm_rope(
+#         qkv=qkv_base,
+#         positions=positions,
+#         q_norm=q_norm,
+#         k_norm=k_norm,
+#         rope=rope,
+#         num_heads_q=num_heads,
+#         num_heads_kv=num_kv_heads,
+#         head_dim=head_dim,
+#     )
 
-    fused_qk_norm_rope(
-        qkv_fused,
-        num_heads,
-        num_kv_heads,
-        num_kv_heads,
-        head_dim,
-        eps,
-        q_weight,
-        k_weight,
-        rope.cos_sin_cache,
-        is_neox,
-        positions.view(-1)
-    )
+#     fused_qk_norm_rope(
+#         qkv_fused,
+#         num_heads,
+#         num_kv_heads,
+#         num_kv_heads,
+#         head_dim,
+#         eps,
+#         q_weight,
+#         k_weight,
+#         rope.cos_sin_cache,
+#         is_neox,
+#         positions.view(-1)
+#     )
 
-    torch.testing.assert_close(
-        qkv_fused,
-        ref_result,
-        atol=1e-2,
-        rtol=1e-2,
-    )
+#     torch.testing.assert_close(
+#         qkv_fused,
+#         ref_result,
+#         atol=1e-2,
+#         rtol=1e-2,
+#     )
 
-if __name__ == "__main__":
-    config = VllmConfig()
-    with set_current_vllm_config(config):
-        test()
+# if __name__ == "__main__":
+#     config = VllmConfig()
+#     with set_current_vllm_config(config):
+#         test()

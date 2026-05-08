@@ -83,7 +83,8 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
 if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops.vllm_helion.per_token_group_fp8_quant.default  # noqa: E501
+    # QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
     QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 
@@ -123,12 +124,18 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
     ): torch.ops.vllm_helion.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic128Sym, False
+    # ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    # FusedRMSQuantKey(
+    #     kFp8Dynamic128Sym, True
+    # ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic128Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    ): torch.ops.vllm_helion.rms_norm_per_block_quant.default,  # noqa: E501
     FusedRMSQuantKey(
         kFp8Dynamic64Sym, False
     ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
@@ -355,7 +362,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
 
@@ -369,6 +376,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=residual,
                 group_size=self.group_shape[1],
+                scale_ue8m0=self.quant_matcher.is_e8m0,
                 is_scale_transposed=self.has_col_major_scales,
             )
 
@@ -450,7 +458,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
-            input = input.to(dtype=self.model_dtype)
+            # input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(
@@ -463,6 +471,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=None,
                 group_size=self.group_shape[1],
+                scale_ue8m0=self.quant_matcher.is_e8m0,
                 is_scale_transposed=self.has_col_major_scales,
             )
 
