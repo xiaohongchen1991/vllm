@@ -37,7 +37,7 @@ Key Classes
 """
 
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, cast, Hashable
 
 import torch
 from torch.library import Library
@@ -55,7 +55,9 @@ if not has_helion():
 import helion
 from helion._compat import requires_torch_version
 from helion.autotuner.base_search import BaseAutotuner
+from helion.autotuner.finite_search import FiniteSearch
 from helion.runtime.config import Config
+from helion.runtime.kernel import BoundKernel
 from helion.runtime.settings import default_autotuner_fn
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
@@ -124,14 +126,25 @@ class PresetConfigSearch(BaseAutotuner):
 
     def __init__(
         self,
+        bound_kernel: BoundKernel,
         args: tuple[Any, ...],
         config_selector: Callable[[tuple[Any, ...]], Config],
+        configs: dict[str, Config],
+        key_computer: Callable[..., Hashable] | None = None,
     ):
+        self.bound_kernel = bound_kernel
         self.args = args
         self.config_selector = config_selector
+        self.configs = configs
+        self.key_computer = key_computer
 
     def autotune(self, *, skip_cache: bool = False) -> Config:
-        return self.config_selector(self.args)
+        config = FiniteSearch(self.bound_kernel, self.args, self.configs.values()).autotune()
+        selected_config_key = next((k for k, v in self.configs.items() if v == config), None)
+        expected_config_key = self.key_computer(*self.args)
+        logger.info(f'{expected_config_key} -> {selected_config_key}')
+        return config
+        # return self.config_selector(self.args)
 
 
 class ConfiguredHelionKernel:
@@ -225,7 +238,7 @@ class ConfiguredHelionKernel:
         config_selector = self._create_config_selector(key_computer)
 
         extra_kwargs = {
-            "autotuner_fn": lambda _, args: PresetConfigSearch(args, config_selector),
+            "autotuner_fn": lambda bound_kernel, args: PresetConfigSearch(bound_kernel, args, config_selector, self.configs, key_computer),
             "key": key_computer,
         }
 
