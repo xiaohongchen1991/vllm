@@ -87,6 +87,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
             residual,
             group_size,
             False,
+            False,
         )
 
     return inputs
@@ -326,6 +327,7 @@ def baseline(
     scale_ub: torch.Tensor,  # []
     residual: torch.Tensor,  # [num_tokens, hidden_size]
     group_size: int,
+    scale_ue8m0: bool,
     is_scale_transposed: bool,
 ):
     return compiled_layer(result, input, weight, scale, epsilon, scale_ub, residual, group_size, is_scale_transposed)
@@ -350,9 +352,10 @@ def helion_kernel(
     scale_ub: torch.Tensor,  # []
     residual: torch.Tensor,  # [num_tokens, hidden_size]
     group_size: int,
+    scale_ue8m0: bool,
     is_scale_transposed: bool,
 ):
     result = torch.empty(result.shape, device=input.device, dtype=result.dtype)
     scale = torch.empty(scale.shape, device=input.device, dtype=scale.dtype)
-    rms_norm_per_block_quant(result, input, weight, scale, epsilon, scale_ub, residual, group_size, is_scale_transposed)
+    rms_norm_per_block_quant(result, input, weight, scale, epsilon, scale_ub, residual, group_size, scale_ue8m0, is_scale_transposed)
     return result, residual, scale

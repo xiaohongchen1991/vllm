@@ -29,26 +29,26 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    # num_tokens_list = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-    num_tokens_list = [8192]
+    num_tokens_list = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    # num_tokens_list = [8192]
     b_shape_list = [
         # Qwen3-1.7B
-        # (2048, 4096),
-        # (2048, 2048),
-        # (2048, 12288),
-        # (6144, 2048),
+        (2048, 4096),
+        (2048, 2048),
+        (2048, 12288),
+        (6144, 2048),
 
         # Qwen3-8B
-        # (4096, 6144),
+        (4096, 6144),
         (4096, 4096),
-        # (4096, 24576),
-        # (12288, 4096),
+        (4096, 24576),
+        (12288, 4096),
 
         # Qwen3-32B
-        # (5120, 10240),
-        # (5120, 5120),
-        # (5120, 51200),
-        # (25600, 5120),
+        (5120, 10240),
+        (5120, 5120),
+        (5120, 51200),
+        (25600, 5120),
     ]
 
     in_dtype: torch.dtype = current_platform.fp8_dtype()

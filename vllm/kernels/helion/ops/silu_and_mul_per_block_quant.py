@@ -59,7 +59,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
         scale_ub = torch.mean(input).to(scale_dtype)
 
         config_key = f"intermediate_size_{intermediate_size}_num_tokens_{num_tokens}"
-        inputs[config_key] = (result, input, scale, group_size, scale_ub, False)
+        inputs[config_key] = (result, input, scale, group_size, False, scale_ub, False)
 
     return inputs
 
@@ -244,6 +244,7 @@ def baseline(
     input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
     scales: torch.Tensor,  # [num_tokens, groups_per_row]
     group_size: int,
+    scale_ue8m0: bool,
     scale_ub: torch.Tensor | None = None,  # scalar tensor
     is_scale_transposed: bool = False,
 ):
@@ -263,10 +264,11 @@ def helion_kernel(
     input: torch.Tensor,  # [num_tokens, 2 * intermediate_size]
     scales: torch.Tensor,  # [num_tokens, groups_per_row]
     group_size: int,
+    scale_ue8m0: bool,
     scale_ub: torch.Tensor | None = None,  # scalar tensor
     is_scale_transposed: bool = False,
 ) -> None:
     out = torch.empty(out.shape, device=input.device, dtype=out.dtype)
     scales = torch.empty(scales.shape, device=input.device, dtype=scales.dtype)
-    silu_and_mul_per_block_quant(out, input, scales, group_size, scale_ub, is_scale_transposed)
+    silu_and_mul_per_block_quant(out, input, scales, group_size, scale_ue8m0, scale_ub, is_scale_transposed)
     return out, scales
