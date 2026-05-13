@@ -186,7 +186,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
 ] = {
     PlatformEnum.CUDA: [
         # FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
-        DeepGemmFp8BlockScaledMMKernel,
+        # DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],

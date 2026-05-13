@@ -203,7 +203,14 @@ config = VllmConfig()
 with set_current_vllm_config(config):
     group_shape = GroupShape(1, 128)
     layer = QuantFP8(static=False, group_shape=group_shape)
-    compiled_layer = torch.compile(layer.forward_native)
+    compiled_layer = torch.compile(
+        layer.forward,
+        fullgraph=True,
+        dynamic=False,
+        backend="inductor",
+        options={'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}
+    )
+
 
 def baseline(
     input: torch.Tensor,  # [num_tokens, hidden_size]

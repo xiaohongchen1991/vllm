@@ -47,7 +47,7 @@ def generate_inputs() -> dict[str, tuple[Any, ...]]:
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
     num_tokens_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
-    # num_tokens_list = [32]
+    # num_tokens_list = [1024]
     num_heads_pair = [
         # Qwen3-1.7B
         (16, 8),
@@ -282,6 +282,9 @@ import torch.nn as nn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm import ir
+rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
+
 
 class Layer(nn.Module):
     def __init__(self) -> None:
@@ -319,10 +322,15 @@ class Layer(nn.Module):
         
 
 config = VllmConfig()
+layer = Layer()
 with set_current_vllm_config(config):
-    layer = Layer()
-    compiled_layer = torch.compile(layer.forward)
-
+    compiled_layer = torch.compile(
+        layer.forward,
+        fullgraph=True,
+        dynamic=False,
+        backend="inductor",
+        options={'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}
+    )
 
 def baseline(
     qkv: torch.Tensor, # [num_tokens, (num_heads_q+num_heads_k+num_heads_v)*head_dim]
@@ -340,6 +348,7 @@ def baseline(
 ):
     return compiled_layer(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids)
     # torch.ops._C.fused_qk_norm_rope(qkv, num_heads_q, num_heads_k, num_heads_v, head_dim, eps, q_weight, k_weight, cos_sin_cache, is_neox, position_ids)
+    # return qkv.split([num_heads_q*head_dim, num_heads_k*head_dim, num_heads_v*head_dim], dim=-1)
     
 
 def helion_kernel(

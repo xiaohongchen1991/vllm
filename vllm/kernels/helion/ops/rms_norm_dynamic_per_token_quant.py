@@ -254,7 +254,14 @@ class Layer(nn.Module):
 config = VllmConfig()
 with set_current_vllm_config(config):
     layer = Layer()
-    compiled_layer = torch.compile(layer.forward)
+    compiled_layer = torch.compile(
+        layer.forward,
+        fullgraph=True,
+        dynamic=False,
+        backend="inductor",
+        options={'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}
+    )
+
 
 def baseline(
     result: torch.Tensor,  # [num_tokens, hidden_size]
