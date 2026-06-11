@@ -182,6 +182,13 @@ class LinearMethodBase(QuantizeMethodBase):
 class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
+    def __init__(
+        self,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.prefix = prefix
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -223,6 +230,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if "helion" in self.prefix:
+            from vllm.kernels.helion.ops.mm import mm
+            return torch.ops.vllm_helion.mm(x, layer.weight.t(), bias)
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
@@ -270,7 +280,7 @@ class LinearBase(PluggableLayer):
         self.allow_fp8_block_shape_mismatch = False
         self.quant_method: QuantizeMethodBase
         if quant_config is None:
-            self.quant_method = UnquantizedLinearMethod()
+            self.quant_method = UnquantizedLinearMethod(prefix)
         elif quant_method := quant_config.get_quant_method(self, prefix=prefix):
             self.quant_method = quant_method
         else:

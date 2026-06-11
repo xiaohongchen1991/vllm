@@ -97,7 +97,7 @@ class LlamaMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             disable_tp=disable_tp,
-            prefix=f"{prefix}.gate_up_proj",
+            prefix=f"helion.{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
@@ -106,7 +106,7 @@ class LlamaMLP(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             disable_tp=disable_tp,
-            prefix=f"{prefix}.down_proj",
+            prefix=f"helion.{prefix}.down_proj",
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -117,6 +117,8 @@ class LlamaMLP(nn.Module):
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
         x = self.act_fn(x)
+        # from vllm.kernels.helion.ops.mm_silu_and_mul import mm_silu_and_mul
+        # x = torch.ops.vllm_helion.mm_silu_and_mul(x, self.gate_up_proj.weight.t(), None)
         x, _ = self.down_proj(x)
         return x
 
@@ -168,7 +170,7 @@ class LlamaAttention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"helion.{prefix}.qkv_proj",
         )
 
         self.o_proj = RowParallelLinear(
@@ -176,7 +178,7 @@ class LlamaAttention(nn.Module):
             output_size=hidden_size,
             bias=bias_o_proj,
             quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
+            prefix=f"helion.{prefix}.o_proj",
         )
 
         self._init_rotary_emb(config, quant_config=quant_config)
