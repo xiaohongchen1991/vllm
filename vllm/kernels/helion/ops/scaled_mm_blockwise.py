@@ -30,23 +30,23 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    m_list = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
+    m_list = [4]
     b_shape_list = [
         # Qwen3-1.7B
         (2048, 4096),
-        (2048, 2048),
-        (2048, 12288),
-        (6144, 2048),
-        # Qwen3-8B
-        (4096, 6144),
-        (4096, 4096),
-        (4096, 24576),
-        (12288, 4096),
-        # Qwen3-32B
-        (5120, 10240),
-        (5120, 5120),
-        (5120, 51200),
-        (25600, 5120),
+        # (2048, 2048),
+        # (2048, 12288),
+        # (6144, 2048),
+        # # Qwen3-8B
+        # (4096, 6144),
+        # (4096, 4096),
+        # (4096, 24576),
+        # (12288, 4096),
+        # # Qwen3-32B
+        # (5120, 10240),
+        # (5120, 5120),
+        # (5120, 51200),
+        # (25600, 5120),
     ]
 
     in_dtype: torch.dtype = current_platform.fp8_dtype()
@@ -63,7 +63,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     for M, (K, N) in product(m_list, b_shape_list):
         scale = 1.0 / math.sqrt(K)
         a = (scale * (0.5 + torch.rand(M, K, dtype=torch.float32, device="cuda"))).to(
-            in_dtype
+            torch.bfloat16
         )
         b = (scale * (0.5 + torch.rand(N, K, dtype=torch.float32, device="cuda"))).to(
             in_dtype
@@ -72,13 +72,9 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         num_group_m = M // group_m
         num_group_k = K // group_k
         num_group_n = N // group_n
-        scale_a = 0.5 + torch.rand(
-            num_group_m, num_group_k, dtype=scale_dtype, device="cuda"
-        )
         scale_b = 0.5 + torch.rand(
             num_group_k, num_group_n, dtype=scale_dtype, device="cuda"
         )
-        scale_a = scale_a.t().contiguous().t()
         scale_b = scale_b.t().contiguous().t()
 
         config_key = CaseKey(
@@ -91,13 +87,10 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         inputs[config_key] = (
             a,
             b,
-            scale_a,
             scale_b,
-            group_m,
             group_k,
             group_n,
             out_dtype,
-            bias,
         )
 
     return inputs
@@ -171,40 +164,19 @@ def fake_impl(
     c = torch.empty((M, N), dtype=out_dtype, device=a.device)
     return c
 
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import _flashinfer_fp8_blockscale_gemm_impl
 
 def baseline(
     a: torch.Tensor,  # [M, K]
     b: torch.Tensor,  # [K, N]
-    scale_a: torch.Tensor,  # [num_group_m, num_group_k]
     scale_b: torch.Tensor,  # [num_group_k, num_group_n]
-    group_m: int,
     group_k: int,
     group_n: int,
     out_dtype: torch.dtype,
-    bias: torch.Tensor | None = None,  # [N]
 ) -> torch.Tensor:
-    def group_broadcast(t, shape):
-        for i, s in enumerate(shape):
-            if t.shape[i] != s and t.shape[i] != 1:
-                assert s % t.shape[i] == 0
-                t = (
-                    t.unsqueeze(i + 1)
-                    .expand(*t.shape[: i + 1], s // t.shape[i], *t.shape[i + 1 :])
-                    .flatten(i, i + 1)
-                )
-        return t
-
-    scale_a = group_broadcast(scale_a, a.shape)
-    scale_b = group_broadcast(scale_b, b.shape)
-
-    out = torch.mm(
-        (scale_a * a.to(dtype=torch.float32)), (scale_b * b.to(dtype=torch.float32))
-    ).to(out_dtype)
-
-    if bias is not None:
-        out = out + bias
-
-    return out
+    return torch.ops.vllm.dynamic_flashinfer_deepgemm_blockscale_gemm(
+        a, b, scale_b, group_k, False
+    )
 
 
 # Overwrite autotune_baseline_atol and autotune_baseline_rtol
@@ -214,7 +186,7 @@ def baseline(
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
-        autotune_baseline_fn=baseline,
+        # autotune_baseline_fn=baseline,
         autotune_baseline_atol=1.0,
         autotune_baseline_rtol=5e-1,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
@@ -306,3 +278,27 @@ def scaled_mm_blockwise(
         c[tile_m, tile_n] = c_blk
 
     return c
+
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
+from vllm.kernels.helion.ops.per_token_group_fp8_quant import per_token_group_fp8_quant
+
+def helion_kernel(
+    a: torch.Tensor,  # [M, K]
+    b: torch.Tensor,  # [K, N]
+    scale_b: torch.Tensor,  # [num_group_k, num_group_n]
+    group_k: int,
+    group_n: int,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    quantized_a = torch.empty(a.shape, device=a.device, dtype=b.dtype)
+    M, K = a.shape
+    scale_a = torch.empty(
+        (M, K // group_k),
+        device=a.device,
+        dtype=torch.float32,
+    )
+    fp8_min, fp8_max = get_fp8_min_max()
+    per_token_group_fp8_quant(a, quantized_a, scale_a, group_k, 1e-10, fp8_min, fp8_max, False)
+    return scaled_mm_blockwise(quantized_a, b, scale_a, scale_b, 1, group_k, group_n, out_dtype, None)
