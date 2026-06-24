@@ -169,6 +169,7 @@ def baseline(
         autotune_baseline_atol=1e-1,
         autotune_baseline_rtol=1e-1,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
+        autotune_config_overrides={'indexing': ['pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer', 'pointer']}
     ),
 )  # type: ignore[misc]
 def scaled_mm(
@@ -204,10 +205,13 @@ def scaled_mm(
         assert bias.numel() == N and bias.dtype == out_dtype
 
     acc_dtype = torch.float32 if a.is_floating_point() else torch.int32
-
-    for tile_m, tile_n in hl.tile([M, N]):
+    split_k = hl.register_tunable("split_k", PowerOfTwoFragment(1, 256))
+    k_block_size = helion.next_power_of_2(helion.cdiv(K, split_k))
+    if split_k > 1:
+        c.zero_()
+    for tile_m, tile_n, outer_k in hl.tile([M, N, K], block_size=[None, None, k_block_size]):
         acc = hl.zeros([tile_m, tile_n], acc_dtype)
-        for tile_k in hl.tile(K):
+        for tile_k in hl.tile(outer_k.begin, outer_k.end):
             acc = hl.dot(
                 a[tile_m, tile_k],
                 b[tile_k, tile_n],
@@ -231,7 +235,10 @@ def scaled_mm(
 
         c_blk = acc.to(out_dtype)
 
-        if bias is not None:
+        if outer_k.begin == 0 and bias is not None:
             c_blk += bias[tile_n]
 
-        c[tile_m, tile_n] = c_blk
+        if split_k == 1:
+            c[tile_m, tile_n] = c_blk
+        else:
+            hl.atomic_add(c, [tile_m, tile_n], c_blk)
