@@ -11,6 +11,9 @@ from vllm.kernels.helion.case_key import CaseKey
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_helion
+from vllm.kernels.quantization.cutedsl.scaled_mm_dispatch import (
+    cutedsl_scaled_mm,
+)
 
 if not has_helion():
     raise ImportError(
@@ -30,26 +33,26 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover
     # all input property combination. Currently, dtypes are fixed. We need
     # optimization to bucket/skip some combinations
-    m_size_list = [1, 2, 4, 8, 16, 32, 64]
+    m_size_list = [1, 2, 4, 8, 16, 32, 64, 128]
     b_shape_list = [
         # qwen3-1.7B
         # TP=1
-        (2048, 4096),
-        (2048, 2048),
-        (2048, 12288),
-        (6144, 2048),
-        # qwen3-8B
-        # TP=1
-        (4096, 6144),
+        # (2048, 4096),
+        # (2048, 2048),
+        # (2048, 12288),
+        # (6144, 2048),
+        # # qwen3-8B
+        # # TP=1
+        # (4096, 6144),
         (4096, 4096),
-        (4096, 24576),
-        (12288, 4096),
-        # qwen3-32B
-        # TP=1
-        (5120, 10240),
-        (5120, 5120),
-        (5120, 51200),
-        (25600, 5120),
+        # (4096, 24576),
+        # (12288, 4096),
+        # # qwen3-32B
+        # # TP=1
+        # (5120, 10240),
+        # (5120, 5120),
+        # (5120, 51200),
+        # (25600, 5120),
     ]
 
     in_dtype: torch.dtype = current_platform.fp8_dtype()
@@ -66,8 +69,12 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         )
         b = b.t()
         c = torch.empty((M, N), dtype=out_dtype, device=a.device)
+        # per token
         scale_a = 0.5 + torch.rand((1, M), dtype=scale_dtype, device="cuda")
         scale_a = scale_a.t()
+        # per tensor
+        # scale_a = 0.5 + torch.rand((1, 1), dtype=scale_dtype, device="cuda")
+        # per tensor
         scale_b = 0.5 + torch.rand((1, 1), dtype=scale_dtype, device="cuda")
         bias = 0.5 * (torch.rand(N, dtype=out_dtype, device="cuda") - 0.5)
 
@@ -156,6 +163,29 @@ def baseline(
 ) -> None:
     torch.ops._C.cutlass_scaled_mm(c, a, b, scale_a, scale_b, bias)
 
+def baseline_cutedsl(
+    c: torch.Tensor,  # [M, N]
+    a: torch.Tensor,  # [M, K]
+    b: torch.Tensor,  # [K, N]
+    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
+    bias: torch.Tensor | None = None,  # [N]
+):
+    return cutedsl_scaled_mm(a, b, scale_a, scale_b, c.dtype, bias)
+
+def baseline_cutlass(
+    c: torch.Tensor,  # [M, N]
+    a: torch.Tensor,  # [M, K]
+    b: torch.Tensor,  # [K, N]
+    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
+    bias: torch.Tensor | None = None,  # [N]
+):
+    # re-initialize tensor c to get a fair comparison with cutlass
+    c = torch.empty((a.shape[0], b.shape[1]), dtype=c.dtype, device=a.device)
+    torch.ops._C.cutlass_scaled_mm(c, a, b, scale_a, scale_b, bias)
+    return c
+
 
 # Overwrite autotune_baseline_atol and autotune_baseline_rtol
 # if too many configs failed due to baseline check during autotuning
@@ -235,3 +265,16 @@ def scaled_mm(
             c_blk += bias[tile_n]
 
         c[tile_m, tile_n] = c_blk
+
+def baseline_helion(
+    c: torch.Tensor,  # [M, N]
+    a: torch.Tensor,  # [M, K]
+    b: torch.Tensor,  # [K, N]
+    scale_a: torch.Tensor,  # [1]/[1, 1]/[M]/[M, 1]
+    scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
+    bias: torch.Tensor | None = None,  # [N]
+):
+    # re-initialize tensor c to get a fair comparison with cutlass
+    c = torch.empty((a.shape[0], b.shape[1]), dtype=c.dtype, device=a.device)
+    scaled_mm(c, a, b, scale_a, scale_b, bias)
+    return c
