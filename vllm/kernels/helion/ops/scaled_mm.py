@@ -205,15 +205,42 @@ def scaled_mm(
 
     acc_dtype = torch.float32 if a.is_floating_point() else torch.int32
 
-    for tile_m, tile_n in hl.tile([M, N]):
-        acc = hl.zeros([tile_m, tile_n], acc_dtype)
+    # uncomment those lines to try alternative approach
+    # block_size_m = hl.register_block_size(M)
+    # block_size_n = hl.register_block_size(N)
+    # swap_ab = hl.constexpr(block_size_m < 64 and block_size_n >= 64)
+
+    for tile_m, tile_n in hl.tile(
+        [M, N],
+        # uncomment it to try alternative approach
+        # block_size=[block_size_m, block_size_n]
+    ):
+        # comment this line to try alternative approach
+        swap_ab = tile_m.block_size < 64 and tile_n.block_size >= 64
+        if swap_ab:
+            acc = hl.zeros([tile_n, tile_m], acc_dtype)
+        else:
+            acc = hl.zeros([tile_m, tile_n], acc_dtype)
         for tile_k in hl.tile(K):
-            acc = hl.dot(
-                a[tile_m, tile_k],
-                b[tile_k, tile_n],
-                acc=acc,
-                out_dtype=acc_dtype,
-            )
+            if swap_ab:
+                a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
+                b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
+                acc = hl.dot(
+                    b_blk,
+                    a_blk,
+                    acc=acc,
+                    out_dtype=acc_dtype,
+                )
+            else:
+                acc = hl.dot(
+                    a[tile_m, tile_k],
+                    b[tile_k, tile_n],
+                    acc=acc,
+                    out_dtype=acc_dtype,
+                )
+
+        if swap_ab:
+            acc = acc.t()
 
         acc = acc.to(torch.float32)
 
