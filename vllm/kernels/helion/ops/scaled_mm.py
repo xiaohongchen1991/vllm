@@ -48,7 +48,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         # qwen3-32B
         # TP=1
         (5120, 10240),
-        (5120, 5120),
+        (8192, 5120),
         (5120, 51200),
         (25600, 5120),
     ]
@@ -110,7 +110,8 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         if key.is_default():
             continue
 
-        configs.setdefault(key["K"], {}).setdefault(key["N"], []).append(key["M"])
+        if all(k in key for k in ("K", "N", "M")):
+            configs.setdefault(key["K"], {}).setdefault(key["N"], []).append(key["M"])
 
     if not configs:
         _pick_cache[cache_key] = None
