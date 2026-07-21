@@ -705,6 +705,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
+        import os
+
+        profile_path = os.environ.get("VLLM_CAPTURE_PROFILE")
+        profiler = None
+        if profile_path:
+            import cProfile
+
+            profiler = cProfile.Profile()
+            profiler.enable()
+
         start_time = time.perf_counter()
         gc.collect()
         torch.accelerator.empty_cache()
@@ -727,6 +737,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.capture()
 
         end_time = time.perf_counter()
+
+        if profiler is not None:
+            import pstats
+
+            profiler.disable()
+            profiler.dump_stats(profile_path)
+            stats = pstats.Stats(profiler)
+            logger.info("capture_model profile: cumulative-time hot spots")
+            stats.sort_stats("cumulative").print_stats(40)
+            logger.info("capture_model profile: total-time hot spots")
+            stats.sort_stats("tottime").print_stats(40)
+
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
