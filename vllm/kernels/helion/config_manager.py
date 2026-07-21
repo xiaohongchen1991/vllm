@@ -72,10 +72,7 @@ class ConfigSet:
                 f"Config not found for kernel '{self._kernel_name}': "
                 f"platform '{platform}' not found. "
                 f"Available platforms: {avail_platforms or '(none)'}. "
-                f"If your GPU is a variant of a supported platform, "
-                f"consider adding a mapping in _GPU_NAME_ALIASES in "
-                f"vllm/kernels/helion/utils.py, or run "
-                f"scripts/autotune_helion_kernels.py to generate configs "
+                f"Run scripts/autotune_helion_kernels.py to generate configs "
                 f"for your platform."
             )
 

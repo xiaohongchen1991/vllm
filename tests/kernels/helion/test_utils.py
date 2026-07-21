@@ -11,14 +11,14 @@ from vllm.kernels.helion.utils import canonicalize_gpu_name
     "driver_reported_name,expected",
     [
         ("NVIDIA H200", "nvidia_h200"),
-        ("NVIDIA A100-SXM4-80GB", "nvidia_a100"),
-        ("NVIDIA H100 80GB HBM3", "nvidia_h100"),
-        ("NVIDIA H100 PCIe", "nvidia_h100"),
-        ("NVIDIA H100 SXM5", "nvidia_h100"),
+        ("NVIDIA A100-SXM4-80GB", "nvidia_a100_sxm4_80gb"),
+        ("NVIDIA H100 80GB HBM3", "nvidia_h100_80gb_hbm3"),
+        ("NVIDIA H100 PCIe", "nvidia_h100_pcie"),
+        ("NVIDIA H100 SXM5", "nvidia_h100_sxm5"),
         ("NVIDIA GeForce RTX 4090", "nvidia_geforce_rtx_4090"),
         ("AMD Instinct MI300X", "amd_instinct_mi300x"),
         ("AMD Instinct MI250X / MI250", "amd_instinct_mi250x_mi250"),
-        ("Tesla V100-SXM2-32GB", "tesla_v100"),
+        ("Tesla V100-SXM2-32GB", "tesla_v100_sxm2_32gb"),
     ],
 )
 def test_canonicalize_gpu_name(driver_reported_name, expected):
