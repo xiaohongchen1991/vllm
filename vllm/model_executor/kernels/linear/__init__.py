@@ -168,6 +168,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.helion import (
     HelionFP8ScaledMMLinearKernel,
+    HelionINT8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.humming import (
     HummingFP8ScaledMMLinearKernel,
@@ -266,6 +267,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "helion": {
         HelionFP8ScaledMMLinearKernel,
+        HelionINT8ScaledMMLinearKernel,
     },
     "deep_gemm": {
         DeepGemmFp8BlockScaledMMKernel,
@@ -321,6 +323,7 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
     PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
         CutlassInt8ScaledMMLinearKernel,
+        HelionINT8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
         HummingInt8ScaledMMLinearKernel,
     ],
@@ -1058,6 +1061,7 @@ __all__ = [
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
     "HelionFP8ScaledMMLinearKernel",
+    "HelionINT8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
     "FlashInferFP8ScaledMMLinearKernel",
     "ChannelWiseTorchFP8ScaledMMLinearKernel",

@@ -6,6 +6,7 @@ Run `pytest tests/model_executor/kernels/linear/test_helion_linear_backend.py`.
 """
 
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,7 +21,8 @@ if not has_helion():
     )
 
 from tests.kernels.helion.utils import skip_if_platform_unsupported
-from tests.kernels.utils import to_fp8
+from tests.kernels.utils import to_fp8, to_int8
+from vllm import _custom_ops as ops
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.ops.scaled_mm import baseline
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -28,15 +30,25 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.helion import (
     HelionFP8ScaledMMLinearKernel,
+    HelionINT8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+
+INT8_PARAM_NAMES = [
+    "weight",
+    "weight_scale",
+    "input_scale",
+    "input_zero_point",
+    "azp_adj",
+]
 
 
 def _make_fp8_config(K: int, N: int) -> FP8ScaledMMLinearLayerConfig:
@@ -289,3 +301,161 @@ class TestHelionFP8ScaledMMLinearKernel:
 
         assert out.shape == (M, N)
         torch.testing.assert_close(out, baseline_out, rtol=1e-1, atol=1e-1)
+
+
+def _make_int8_config() -> Int8ScaledMMLinearLayerConfig:
+    return Int8ScaledMMLinearLayerConfig(
+        is_static_input_scheme=False,
+        is_channelwise=True,
+        input_symmetric=True,
+    )
+
+
+@contextmanager
+def _patch_int8_can_implement_env(
+    disabled: bool = False, disabled_reason: str | None = None
+):
+    mock_scaled_mm = MagicMock()
+    mock_scaled_mm._disabled = disabled
+    mock_scaled_mm._disabled_reason = disabled_reason
+    with patch(
+        "vllm.kernels.helion.ops.scaled_mm.scaled_mm",
+        mock_scaled_mm,
+    ):
+        yield
+
+
+class TestHelionINT8ScaledMMLinearKernel:
+    @pytest.mark.cpu_test
+    def test_can_implement(self):
+        with _patch_int8_can_implement_env():
+            can_impl, reason = HelionINT8ScaledMMLinearKernel.can_implement(
+                _make_int8_config()
+            )
+        assert can_impl, reason
+        assert reason is None
+
+    @pytest.mark.cpu_test
+    def test_disabled_op(self):
+        with _patch_int8_can_implement_env(
+            disabled=True, disabled_reason="no configs for platform"
+        ):
+            can_impl, reason = HelionINT8ScaledMMLinearKernel.can_implement(
+                _make_int8_config()
+            )
+        assert not can_impl
+        assert reason is not None
+        assert "disabled" in reason
+        assert "no configs for platform" in reason
+
+    @staticmethod
+    def _make_apply_kernel(
+        helion_max_num_tokens: int,
+    ) -> HelionINT8ScaledMMLinearKernel:
+        kernel = object.__new__(HelionINT8ScaledMMLinearKernel)
+        kernel.layer_param_names = INT8_PARAM_NAMES
+        kernel.helion_max_num_tokens = helion_max_num_tokens
+        return kernel
+
+    @staticmethod
+    def _layer(
+        w_q: torch.Tensor,
+        w_s: torch.Tensor,
+        i_s: torch.Tensor | None = None,
+        i_zp: torch.Tensor | None = None,
+        azp_adj: torch.Tensor | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            weight=w_q,
+            weight_scale=w_s,
+            input_scale=i_s,
+            input_zero_point=i_zp,
+            azp_adj=azp_adj,
+        )
+
+    def _run_symmetric(self, M: int, N: int, K: int, use_bias: bool) -> None:
+        skip_if_platform_unsupported("scaled_mm")
+
+        # M above the Helion threshold and 16-aligned weight -> CUTLASS fallback.
+        aligned = K % 16 == 0 and N % 16 == 0
+        if M > 16 and aligned:
+            pytest.skip("CUTLASS int8 scaled_mm unsupported")
+
+        set_random_seed(0)
+        out_dtype = torch.bfloat16
+
+        x = torch.randn((M, K), device="cuda", dtype=out_dtype)
+        # channelwise weight, dynamic per-token activation (symmetric).
+        # Weight scale is [N, 1] to match the checkpoint's channelwise layout.
+        w_q = to_int8(torch.randn((N, K), device="cuda") * 5).t()
+        w_s = torch.rand((N, 1), device="cuda", dtype=torch.float32) / 10
+        bias = torch.rand((N,), device="cuda", dtype=out_dtype) if use_bias else None
+
+        kernel = self._make_apply_kernel(helion_max_num_tokens=16)
+        layer = self._layer(w_q, w_s)
+        out = kernel.apply_weights(layer, x, bias)
+
+        x_q, x_s, _ = ops.scaled_int8_quant(x.contiguous(), None, None, symmetric=True)
+        expected = torch.empty((M, N), dtype=out_dtype, device="cuda")
+        baseline(expected, x_q, w_q, x_s, w_s, bias)
+
+        assert out.shape == (M, N)
+        torch.testing.assert_close(out, expected, rtol=1e-1, atol=1e0)
+
+    @pytest.mark.skipif(
+        not current_platform.is_cuda(), reason="apply_weights requires CUDA"
+    )
+    @pytest.mark.parametrize("M", [4, 32])
+    @pytest.mark.parametrize("N,K", [(256, 128), (496, 256)])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    def test_apply_weights_symmetric_aligned(self, M, N, K, use_bias):
+        self._run_symmetric(M, N, K, use_bias)
+
+    @pytest.mark.skipif(
+        not current_platform.is_cuda(), reason="apply_weights requires CUDA"
+    )
+    @pytest.mark.parametrize("M", [4, 32])
+    @pytest.mark.parametrize("N,K", [(255, 513), (100, 200)])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    def test_apply_weights_symmetric_triton_fallback(self, M, N, K, use_bias):
+        # N or K not 16-aligned -> triton_scaled_mm branch.
+        self._run_symmetric(M, N, K, use_bias)
+
+    @pytest.mark.skipif(
+        not current_platform.is_cuda(), reason="apply_weights requires CUDA"
+    )
+    @pytest.mark.parametrize("M", [4, 32])
+    @pytest.mark.parametrize("N,K", [(256, 128)])
+    @pytest.mark.parametrize("use_bias", [True, False])
+    def test_apply_weights_asymmetric_uses_cutlass(self, M, N, K, use_bias):
+        # Helion is never used for the asymmetric (azp) case; it must route
+        # through ops.cutlass_scaled_mm_azp and skip the Helion hybrid op.
+        skip_if_platform_unsupported("scaled_mm")
+
+        set_random_seed(0)
+        out_dtype = torch.bfloat16
+
+        x = torch.randn((M, K), device="cuda", dtype=out_dtype)
+        w_q = to_int8(torch.randn((N, K), device="cuda") * 5).t()
+        w_s = torch.rand((1, N), device="cuda", dtype=torch.float32) / 10
+        # dynamic per-token asymmetric: azp_adj set, input_zero_point None.
+        azp_adj = w_q.sum(dim=0, keepdim=True, dtype=torch.int32)
+        bias = torch.rand((N,), device="cuda", dtype=out_dtype) if use_bias else None
+
+        kernel = self._make_apply_kernel(helion_max_num_tokens=16)
+        layer = self._layer(w_q, w_s, azp_adj=azp_adj)
+
+        sentinel = torch.zeros((M, N), device="cuda", dtype=out_dtype)
+        with (
+            patch.object(
+                ops, "cutlass_scaled_mm_azp", return_value=sentinel
+            ) as mock_azp,
+            patch.object(
+                torch.ops._C, "helion_cutlass_hybrid_scaled_mm"
+            ) as mock_helion,
+        ):
+            out = kernel.apply_weights(layer, x, bias)
+
+        mock_azp.assert_called_once()
+        mock_helion.assert_not_called()
+        assert out is sentinel
