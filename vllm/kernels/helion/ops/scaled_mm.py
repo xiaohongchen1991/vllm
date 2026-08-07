@@ -20,6 +20,7 @@ if not has_helion():
 
 import helion
 import helion.language as hl
+from helion.autotuner import PowerOfTwoFragment
 
 from vllm.kernels.helion.register import register_kernel
 
@@ -266,9 +267,17 @@ def scaled_mm(
 
     acc_dtype = torch.float32 if a.is_floating_point() else torch.int32
 
-    for tile_m, tile_n in hl.tile([M, N]):
+    split_k = hl.register_tunable(
+        "split_k", PowerOfTwoFragment(1, 256)
+    )
+    k_block_size = helion.next_power_of_2(helion.cdiv(K, split_k))
+    if split_k > 1:
+        out.zero_()
+
+
+    for tile_m, tile_n, outer_k in hl.tile([M, N, K], block_size=[None, None, k_block_size]):
         acc = hl.zeros([tile_n, tile_m], acc_dtype)
-        for tile_k in hl.tile(K):
+        for tile_k in hl.tile(outer_k.begin, outer_k.end):
             a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
             b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
             acc = hl.dot(
@@ -295,6 +304,10 @@ def scaled_mm(
         out_blk = acc.to(out_dtype)
 
         if bias is not None:
-            out_blk += bias[tile_n]
+            if outer_k.begin == 0:
+                out_blk += bias[tile_n]
 
-        out[tile_m, tile_n] = out_blk
+        if split_k == 1:
+            out[tile_m, tile_n] = out_blk
+        else:
+            hl.atomic_add(out, [tile_m, tile_n], out_blk)
