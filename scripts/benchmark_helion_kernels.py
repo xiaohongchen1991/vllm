@@ -102,8 +102,8 @@ def print_table(rows: list[Row]) -> None:
     data = [
         [
             r.case,
-            f"{r.baseline_ms:.3f}",
-            f"{r.kernel_ms:.3f}",
+            f"{r.baseline_ms:.6f}",
+            f"{r.kernel_ms:.6f}",
             f"{r.speedup_x:.3f}",
         ]
         for r in rows
@@ -195,13 +195,14 @@ def make_autotune_baseline(kernel_name: str) -> Callable:
         )
         sys.exit(1)
 
-    return torch.compile(
-        baseline_fn,
-        fullgraph=True,
-        dynamic=False,
-        backend="inductor",
-        options=_TORCH_COMPILE_OPTIONS,
-    )
+    # return torch.compile(
+    #     baseline_fn,
+    #     fullgraph=True,
+    #     dynamic=False,
+    #     backend="inductor",
+    #     options=_TORCH_COMPILE_OPTIONS,
+    # )
+    return baseline_fn
 
 
 def cleanup_gpu_resources() -> None:

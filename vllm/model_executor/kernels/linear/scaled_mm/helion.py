@@ -12,9 +12,6 @@ from vllm.config import (
     CUDAGraphMode,
     get_current_vllm_config,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -46,7 +43,7 @@ from .ScaledMMLinearKernel import (
 # The same threshold may not apply for other hardware types.
 # Need to generalize this threshold later on when supporting more hardwares.
 HELION_SCALED_MM_MAX_NUM_TOKENS = 32
-HELION_BLOCK_SCALED_MM_MAX_NUM_TOKENS = 24
+HELION_BLOCK_SCALED_MM_MAX_NUM_TOKENS = 32
 
 
 def _hybrid_scaled_mm(
@@ -544,12 +541,7 @@ class HelionFP8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
     ) -> torch.Tensor:
         group_size = self.weight_group_shape.col
         use_deep_gemm_e8m0 = self.fallback.use_deep_gemm_e8m0
-        A, As = per_token_group_quant_fp8(
-            A,
-            group_size=group_size,
-            column_major_scales=True,
-            use_ue8m0=use_deep_gemm_e8m0,
-        )
+        A, As = self.fallback.quant_fp8(A)
 
         out = torch.empty(
             (A.shape[0], B.shape[0]),

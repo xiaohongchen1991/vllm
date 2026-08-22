@@ -21,7 +21,7 @@ if not has_helion():
 
 import helion
 import helion.language as hl
-from helion.autotuner import PowerOfTwoFragment
+from helion.autotuner import PowerOfTwoFragment, BooleanFragment
 
 from vllm.kernels.helion.register import register_kernel
 
@@ -39,22 +39,22 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     b_shape_dtype_list: list[tuple[tuple[int, int], torch.dtype]] = [
         # qwen3-1.7B
         # TP=1
-        ((2048, 4096), fp8),
-        ((2048, 2048), fp8),
-        ((2048, 12288), fp8),
-        ((6144, 2048), fp8),
+        # ((2048, 4096), fp8),
+        # ((2048, 2048), fp8),
+        # ((2048, 12288), fp8),
+        # ((6144, 2048), fp8),
         # qwen3-4B
         # TP=1
-        ((2560, 6144), fp8),
-        ((4096, 2560), fp8),
-        ((2560, 19456), fp8),
-        ((9728, 2560), fp8),
+        # ((2560, 6144), fp8),
+        # ((4096, 2560), fp8),
+        # ((2560, 19456), fp8),
+        # ((9728, 2560), fp8),
         # qwen3-8B
         # TP=1
-        ((4096, 6144), fp8),
-        ((4096, 4096), fp8),
-        ((4096, 24576), fp8),
-        ((12288, 4096), fp8),
+        # ((4096, 6144), fp8),
+        # ((4096, 4096), fp8),
+        # ((4096, 24576), fp8),
+        # ((12288, 4096), fp8),
         # qwen3-14B
         # TP=1
         ((5120, 7168), fp8),
@@ -67,6 +67,11 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         ((8192, 5120), fp8),
         ((5120, 51200), fp8),
         ((25600, 5120), fp8),
+        # qwen3.8-27B
+        # TP=1
+        ((5120, 14336), fp8),
+        ((6144, 5120), fp8),
+        ((5120, 16384), fp8),
     ]
 
     scale_dtype: torch.dtype = torch.float32
@@ -195,25 +200,28 @@ def baseline(
     a_scales: torch.Tensor,  # [num_group_m, num_group_k]
     b_scales: torch.Tensor,  # [num_group_k, num_group_n]
 ) -> None:
-    def group_broadcast(t, shape):
-        for i, s in enumerate(shape):
-            if t.shape[i] != s and t.shape[i] != 1:
-                assert s % t.shape[i] == 0
-                t = (
-                    t.unsqueeze(i + 1)
-                    .expand(*t.shape[: i + 1], s // t.shape[i], *t.shape[i + 1 :])
-                    .flatten(i, i + 1)
-                )
-        return t
+    # def group_broadcast(t, shape):
+    #     for i, s in enumerate(shape):
+    #         if t.shape[i] != s and t.shape[i] != 1:
+    #             assert s % t.shape[i] == 0
+    #             t = (
+    #                 t.unsqueeze(i + 1)
+    #                 .expand(*t.shape[: i + 1], s // t.shape[i], *t.shape[i + 1 :])
+    #                 .flatten(i, i + 1)
+    #             )
+    #     return t
 
-    a_scales = group_broadcast(a_scales, a.shape)
-    b_scales = group_broadcast(b_scales, b.shape)
+    # a_scales = group_broadcast(a_scales, a.shape)
+    # b_scales = group_broadcast(b_scales, b.shape)
 
-    c = torch.mm(
-        (a_scales * a.to(dtype=torch.float32)), (b_scales * b.to(dtype=torch.float32))
-    ).to(out.dtype)
+    # c = torch.mm(
+    #     (a_scales * a.to(dtype=torch.float32)), (b_scales * b.to(dtype=torch.float32))
+    # ).to(out.dtype)
 
-    out.copy_(c)
+    # out.copy_(c)
+
+    from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import fp8_gemm_nt
+    fp8_gemm_nt((a, a_scales), (b.T, b_scales.T), out, is_deep_gemm_e8m0_used=True)
 
 
 # Overwrite autotune_baseline_atol and autotune_baseline_rtol
@@ -225,8 +233,8 @@ def baseline(
     fake_impl=fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
-        autotune_baseline_atol=1.0,
-        autotune_baseline_rtol=5e-1,
+        autotune_baseline_atol=1e-1,
+        autotune_baseline_rtol=1e-1,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
 )  # type: ignore[misc]
@@ -284,28 +292,35 @@ def block_scaled_mm(
     if split_k > 1:
         out.zero_()
 
+    swap_ab = hl.register_tunable(
+        "swap_ab", BooleanFragment()
+    )
+
     for tile_m, tile_n, outer_k in hl.tile(
         [M, N, K], block_size=[None, None, k_block_size]
     ):
-        accumulator = hl.zeros(
+        acc = hl.zeros(
             [tile_m, tile_n],
             torch.float32,
         )
 
         # keep block_size = group_k for K dimension to avoid element-wise scaling
         for tile_k in hl.tile(outer_k.begin, outer_k.end, block_size=group_k):
-            a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
-            b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
+            if swap_ab:
+                a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
+                b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
 
-            acc_blk = (
-                hl.dot(
+                acc_blk = hl.dot(
                     b_blk,
                     a_blk,
                     out_dtype=acc_dtype,
-                )
-                .t()
-                .to(torch.float32)
-            )
+                ).t().to(torch.float32)
+            else:
+                acc_blk = hl.dot(
+                    a[tile_m, tile_k],
+                    b[tile_k, tile_n],
+                    out_dtype=acc_dtype,
+                ).to(torch.float32)
 
             gk_idx = tile_k.begin // group_k
             a_scales_blk = a_scales[tile_m, gk_idx][:, None]
@@ -314,9 +329,9 @@ def block_scaled_mm(
             acc_blk = a_scales_blk * acc_blk
             acc_blk = b_scales_blk * acc_blk
 
-            accumulator = accumulator + acc_blk
+            acc = acc + acc_blk
 
-        out_blk = accumulator.to(out_dtype)
+        out_blk = acc.to(out_dtype)
 
         if split_k == 1:
             out[tile_m, tile_n] = out_blk

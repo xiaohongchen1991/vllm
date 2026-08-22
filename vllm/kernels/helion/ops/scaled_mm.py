@@ -20,6 +20,7 @@ if not has_helion():
 
 import helion
 import helion.language as hl
+from helion.autotuner import PowerOfTwoFragment, BooleanFragment
 
 from vllm.kernels.helion.register import register_kernel
 
@@ -31,7 +32,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # m_size_list follows cudagraph_capture_sizes pattern:
     # [1, 2, 4] + range(8, 256, 8) + range(256, max_graph_size + 1, 16),
     # but is capped here to cover only small M values.
-    m_size_list = [1, 2, 4, 8, 16, 24, 32]
+    m_size_list = [16, 24]
 
     fp8: torch.dtype = current_platform.fp8_dtype()
     int8: torch.dtype = torch.int8
@@ -44,6 +45,10 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         ((2048, 2048), fp8),
         ((2048, 12288), fp8),
         ((6144, 2048), fp8),
+        # ((2048, 4096), int8),
+        # ((2048, 2048), int8),
+        # ((2048, 12288), int8),
+        # ((6144, 2048), int8),
         # qwen3-4B
         # TP=1
         ((2560, 6144), fp8),
@@ -60,12 +65,20 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         ((4096, 4096), fp8),
         ((4096, 24576), fp8),
         ((12288, 4096), fp8),
+        ((4096, 6144), int8),
+        ((4096, 4096), int8),
+        # ((4096, 24576), int8),
+        # ((12288, 4096), int8),
         # qwen3-14B
         # TP=1
         ((5120, 7168), fp8),
         ((5120, 5120), fp8),
         ((5120, 34816), fp8),
         ((17408, 5120), fp8),
+        # ((5120, 7168), int8),
+        # ((5120, 5120), int8),
+        # ((5120, 34816), int8),
+        # ((17408, 5120), int8),
         # qwen3-32B
         # TP=1
         ((5120, 10240), fp8),
@@ -76,51 +89,43 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         ((8192, 5120), int8),
         ((5120, 51200), int8),
         ((25600, 5120), int8),
-        # TP=2
-        ((5120, 5120), fp8),
-        ((4096, 5120), fp8),
-        ((5120, 25600), fp8),
-        ((12800, 5120), fp8),
-        ((5120, 5120), int8),
-        ((4096, 5120), int8),
-        ((5120, 25600), int8),
-        ((12800, 5120), int8),
-        # llama3.1-8B
+        # qwen3.8-27B
         # TP=1
-        ((4096, 28672), fp8),
-        ((14336, 4096), fp8),
-        ((4096, 6144), int8),
-        ((4096, 4096), int8),
-        ((4096, 28672), int8),
-        ((14336, 4096), int8),
-        # llama3.3-70B
-        # TP=2
-        ((8192, 5120), fp8),
-        ((4096, 8192), fp8),
-        ((8192, 28672), fp8),
-        ((14336, 8192), fp8),
-        ((8192, 5120), int8),
-        ((4096, 8192), int8),
-        ((8192, 28672), int8),
-        ((14336, 8192), int8),
-        # mistral-24B
-        # TP=1
-        ((5120, 6144), fp8),
-        ((4096, 5120), fp8),
-        ((5120, 65536), fp8),
-        ((32768, 5120), fp8),
-        # TP=2
-        ((5120, 3072), fp8),
-        ((2048, 5120), fp8),
-        ((5120, 32768), fp8),
-        ((16384, 5120), fp8),
+        # ((5120, 14336), fp8),
+        # ((6144, 5120), fp8),
+        # ((5120, 16384), fp8),
+        # ((5120, 14336), int8),
+        # ((6144, 5120), int8),
+        # ((5120, 16384), int8),
     ]
+
+    # Only the (K, N, in_dtype) -> M cases whose tuned config over-tiles the M
+    # dimension (block_sizes[0] > next_power_of_2(M)) are generated, so
+    # autotuning focuses on re-tuning those.
+    underperforming_m_sizes: dict[tuple[int, int, torch.dtype], tuple[int, ...]] = {
+        (2048, 12288, fp8): (16,),
+        (2048, 4096, int8): (32,),
+        (2048, 12288, int8): (16,),
+        (6144, 2048, int8): (24, 32),
+        (2560, 6144, fp8): (24, 32),
+        (4096, 2560, fp8): (32,),
+        (4096, 4096, fp8): (24, 32),
+        (4096, 6144, int8): (32,),
+        (4096, 4096, int8): (24, 32),
+        (4096, 24576, int8): (32,),
+        (12288, 4096, int8): (16, 24),
+        (8192, 5120, int8): (16, 32),
+        (5120, 51200, int8): (16,),
+    }
+
     has_bias = False
 
     scale_dtype: torch.dtype = torch.float32
     out_dtype: torch.dtype = torch.bfloat16
     inputs = {}
     for M, ((K, N), in_dtype) in product(m_size_list, b_shape_dtype_list):
+        # if M not in underperforming_m_sizes.get((K, N, in_dtype), ()):
+        #     continue
         scale = 1.0 / math.sqrt(K)
         if in_dtype.is_floating_point:
             a = (
@@ -130,8 +135,8 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 scale * (0.5 + torch.rand(N, K, dtype=torch.float32, device="cuda"))
             ).to(in_dtype)
         else:
-            a = torch.randint(-32, 32, (M, K), dtype=in_dtype, device="cuda")
-            b = torch.randint(-32, 32, (N, K), dtype=in_dtype, device="cuda")
+            a = torch.randint(-4, 32, (M, K), dtype=in_dtype, device="cuda")
+            b = torch.randint(-4, 32, (N, K), dtype=in_dtype, device="cuda")
         b = b.t()
         out = torch.empty((M, N), dtype=out_dtype, device=a.device)
         a_scales = 0.5 + torch.rand((1, M), dtype=scale_dtype, device="cuda")
@@ -292,19 +297,42 @@ def scaled_mm(
 
     acc_dtype = torch.float32 if a.is_floating_point() else torch.int32
 
-    for tile_m, tile_n in hl.tile([M, N]):
-        acc = hl.zeros([tile_n, tile_m], acc_dtype)
-        for tile_k in hl.tile(K):
-            a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
-            b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
-            acc = hl.dot(
-                b_blk,
-                a_blk,
-                acc=acc,
-                out_dtype=acc_dtype,
-            )
+    split_k = hl.register_tunable(
+        "split_k", PowerOfTwoFragment(1, 256)
+    )
+    k_block_size = helion.next_power_of_2(helion.cdiv(K, split_k))
+    if split_k > 1:
+        out.zero_()
 
-        acc = acc.t().to(torch.float32)
+    swap_ab = hl.register_tunable(
+        "swap_ab", BooleanFragment()
+    )
+
+    for tile_m, tile_n, outer_k in hl.tile([M, N, K], block_size=[None, None, k_block_size]):
+        acc = hl.zeros([tile_m, tile_n], acc_dtype)
+        acc_t = acc.t()
+        for tile_k in hl.tile(outer_k.begin, outer_k.end):
+            if swap_ab:
+                a_blk = hl.load(a, [tile_m.index[None, :], tile_k.index[:, None]])
+                b_blk = hl.load(b, [tile_k.index[None, :], tile_n.index[:, None]])
+                acc_t = hl.dot(
+                    b_blk,
+                    a_blk,
+                    acc=acc_t,
+                    out_dtype=acc_dtype,
+                )
+            else:
+                acc = hl.dot(
+                    a[tile_m, tile_k],
+                    b[tile_k, tile_n],
+                    acc=acc,
+                    out_dtype=acc_dtype,
+                )
+
+        if swap_ab:
+            acc = acc_t.t().to(torch.float32)
+        else:
+            acc = acc.to(torch.float32)
 
         if a_scales.shape[0] == M:
             a_scales_blk = a_scales[tile_m, :]
@@ -321,6 +349,10 @@ def scaled_mm(
         out_blk = acc.to(out_dtype)
 
         if bias is not None:
-            out_blk += bias[tile_n]
+            if outer_k.begin == 0:
+                out_blk += bias[tile_n]
 
-        out[tile_m, tile_n] = out_blk
+        if split_k == 1:
+            out[tile_m, tile_n] = out_blk
+        else:
+            hl.atomic_add(out, [tile_m, tile_n], out_blk)
