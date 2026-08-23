@@ -13,8 +13,8 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
@@ -23,40 +23,40 @@
       ],
       "range_unroll_factors": [
         0,
-        2
+        4
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        false
       ],
       "range_flattens": [
         null,
-        false
+        null
       ],
       "load_eviction_policies": [
-        "",
         "last",
         "",
         "first",
+        "first",
         "last",
-        "last",
+        "",
         "last",
         "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "tensor_descriptor",
         "pointer",
         "pointer",
-        "tensor_descriptor"
+        "tensor_descriptor",
+        "pointer"
       ],
       "atomic_indexing": [
         "pointer"
@@ -142,7 +142,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
@@ -163,7 +163,7 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        false
       ],
       "range_flattens": [
         null,
@@ -172,7 +172,7 @@
       "load_eviction_policies": [
         "",
         "last",
-        "",
+        "last",
         "first",
         "last",
         "last",
@@ -182,15 +182,15 @@
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "tensor_descriptor",
         "pointer",
         "pointer",
-        "tensor_descriptor"
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer"
       ],
       "atomic_indexing": [
         "pointer"
@@ -343,7 +343,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
@@ -368,27 +368,27 @@
       ],
       "range_flattens": [
         null,
-        false
+        true
       ],
       "load_eviction_policies": [
-        "",
         "last",
+        "",
         "",
         "first",
         "last",
-        "last",
+        "first",
         "last",
         "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
         "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer",
+        "pointer",
         "pointer",
         "pointer",
         "tensor_descriptor"
@@ -478,13 +478,13 @@
     "config": {
       "block_sizes": [
         16,
-        64
+        128
       ],
       "loop_orders": [
         [
+          0,
           2,
-          1,
-          0
+          1
         ]
       ],
       "l2_groupings": [
@@ -492,39 +492,39 @@
       ],
       "range_unroll_factors": [
         0,
-        2
+        4
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        null
+        false
       ],
       "range_flattens": [
         null,
-        null
+        false
       ],
       "load_eviction_policies": [
-        "",
-        "first",
-        "first",
-        "first",
+        "last",
+        "last",
         "first",
         "first",
         "",
-        ""
+        "",
+        "last",
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
@@ -632,34 +632,34 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        false
       ],
       "range_flattens": [
         null,
-        false
+        true
       ],
       "load_eviction_policies": [
-        "",
         "last",
+        "first",
         "",
         "first",
-        "last",
+        "first",
         "last",
         "last",
         "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
         "tensor_descriptor",
-        "pointer",
-        "pointer",
-        "tensor_descriptor"
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
       ],
       "atomic_indexing": [
         "pointer"
@@ -812,7 +812,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
@@ -837,27 +837,27 @@
       ],
       "range_flattens": [
         null,
-        false
+        true
       ],
       "load_eviction_policies": [
-        "",
         "last",
+        "",
         "",
         "first",
         "last",
-        "last",
+        "first",
         "last",
         "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
         "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer",
+        "pointer",
         "pointer",
         "pointer",
         "tensor_descriptor"
@@ -1013,7 +1013,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
@@ -1034,16 +1034,16 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        false
       ],
       "range_flattens": [
         null,
-        false
+        null
       ],
       "load_eviction_policies": [
-        "",
+        "first",
         "last",
-        "",
+        "last",
         "first",
         "last",
         "last",
@@ -1053,15 +1053,15 @@
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "tensor_descriptor",
         "pointer",
         "pointer",
-        "tensor_descriptor"
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
       ],
       "atomic_indexing": [
         "pointer"
@@ -1415,7 +1415,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        4,
         64
       ],
       "loop_orders": [
@@ -1426,43 +1426,43 @@
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
-        1
+        3
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        true
       ],
       "range_flattens": [
         null,
-        true
+        false
       ],
       "load_eviction_policies": [
-        "first",
-        "last",
         "",
-        "first",
+        "last",
         "last",
         "first",
-        "",
-        ""
+        "last",
+        "first",
+        "last",
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
@@ -1493,50 +1493,50 @@
         ]
       ],
       "l2_groupings": [
-        2
+        1
       ],
       "range_unroll_factors": [
         0,
-        1
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        null
       ],
       "range_flattens": [
         null,
         true
       ],
       "load_eviction_policies": [
+        "last",
+        "first",
+        "",
+        "first",
         "",
         "last",
         "",
-        "first",
-        "last",
-        "first",
-        "last",
         "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 64,
+      "split_k": 128,
       "swap_ab": true
     }
   },
@@ -2024,12 +2024,12 @@
       "loop_orders": [
         [
           2,
-          1,
-          0
+          0,
+          1
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -2039,32 +2039,32 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        false
       ],
       "range_flattens": [
         null,
-        false
+        null
       ],
       "load_eviction_policies": [
-        "first",
         "",
+        "first",
         "last",
         "first",
-        "",
-        "first",
-        "",
-        ""
+        "last",
+        "last",
+        "last",
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer"
       ],
@@ -2234,40 +2234,40 @@
       ],
       "range_unroll_factors": [
         0,
-        1
+        3
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        null
       ],
       "range_flattens": [
         null,
         true
       ],
       "load_eviction_policies": [
-        "last",
-        "last",
-        "",
         "first",
-        "last",
+        "first",
+        "first",
         "first",
         "",
-        "first"
+        "last",
+        "last",
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
@@ -4430,7 +4430,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
@@ -4455,27 +4455,27 @@
       ],
       "range_flattens": [
         null,
-        false
+        true
       ],
       "load_eviction_policies": [
-        "",
         "last",
+        "",
         "",
         "first",
         "last",
-        "last",
+        "first",
         "last",
         "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
         "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer",
+        "pointer",
         "pointer",
         "pointer",
         "tensor_descriptor"
@@ -5306,17 +5306,17 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        64
+        2
       ],
       "range_unroll_factors": [
         0,
-        2
+        4
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -5326,30 +5326,30 @@
       ],
       "range_flattens": [
         null,
-        true
+        null
       ],
       "load_eviction_policies": [
         "last",
-        "last",
-        "last",
+        "",
         "first",
-        "last",
+        "first",
         "first",
         "",
-        "first"
+        "first",
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
@@ -5435,44 +5435,44 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
         [
           2,
-          1,
-          0
+          0,
+          1
         ]
       ],
       "l2_groupings": [
-        32
+        1
       ],
       "range_unroll_factors": [
         0,
-        3
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        null
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
-        "last",
         "",
-        "last",
-        "first",
+        "",
         "",
         "first",
+        "first",
+        "",
         "last",
-        ""
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
         "pointer",
@@ -5483,7 +5483,7 @@
         "pointer",
         "pointer",
         "pointer",
-        "pointer"
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "tensor_descriptor"
@@ -5507,17 +5507,17 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
-        3
+        4
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -5527,29 +5527,29 @@
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
+        "last",
+        "last",
+        "last",
+        "last",
         "first",
         "",
-        "",
         "last",
-        "",
-        "last",
-        "",
         ""
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
@@ -5569,44 +5569,44 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
         [
           2,
-          1,
-          0
+          0,
+          1
         ]
       ],
       "l2_groupings": [
-        32
+        1
       ],
       "range_unroll_factors": [
         0,
-        4
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
         "",
         "",
         "",
         "first",
-        "",
         "first",
+        "",
         "last",
-        ""
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
         "pointer",
@@ -5617,10 +5617,10 @@
         "pointer",
         "pointer",
         "pointer",
-        "pointer"
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
-        "pointer"
+        "tensor_descriptor"
       ],
       "pid_type": "flat",
       "split_k": 32,
@@ -5718,7 +5718,7 @@
       ],
       "range_unroll_factors": [
         0,
-        2
+        4
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -5731,27 +5731,27 @@
         false
       ],
       "load_eviction_policies": [
-        "",
         "last",
+        "first",
         "",
         "first",
+        "first",
+        "first",
         "last",
-        "last",
-        "last",
-        "last"
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
         "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "tensor_descriptor",
         "pointer",
         "pointer",
-        "tensor_descriptor"
+        "pointer"
       ],
       "atomic_indexing": [
         "pointer"
@@ -5972,7 +5972,7 @@
     "config": {
       "block_sizes": [
         16,
-        64
+        128
       ],
       "loop_orders": [
         [
@@ -5982,47 +5982,47 @@
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
-        1
+        0
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        null
+        false
       ],
       "range_flattens": [
         null,
         true
       ],
       "load_eviction_policies": [
-        "first",
         "",
-        "first",
         "last",
         "",
         "last",
         "first",
+        "",
+        "",
         ""
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
       "split_k": 16,
@@ -6116,11 +6116,11 @@
         ]
       ],
       "l2_groupings": [
-        16
+        8
       ],
       "range_unroll_factors": [
         0,
-        2
+        0
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -6133,30 +6133,30 @@
         null
       ],
       "load_eviction_policies": [
-        "first",
-        "first",
-        "last",
-        "last",
-        "first",
-        "last",
         "",
+        "first",
+        "last",
+        "last",
+        "first",
+        "first",
+        "first",
         "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
-        "pointer"
+        "tensor_descriptor"
       ],
       "pid_type": "flat",
       "split_k": 16,
@@ -6250,41 +6250,41 @@
         ]
       ],
       "l2_groupings": [
-        16
+        1
       ],
       "range_unroll_factors": [
         0,
-        3
+        0
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        null
+        false
       ],
       "range_flattens": [
         null,
-        false
+        null
       ],
       "load_eviction_policies": [
+        "last",
+        "",
+        "first",
         "",
         "first",
         "first",
-        "first",
-        "first",
-        "first",
-        "first",
-        ""
+        "",
+        "first"
       ],
       "num_warps": 8,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer"
@@ -6574,8 +6574,8 @@
     },
     "config": {
       "block_sizes": [
-        16,
-        64
+        32,
+        128
       ],
       "loop_orders": [
         [
@@ -6585,7 +6585,7 @@
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -6595,31 +6595,31 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        true
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
         "last",
-        "first",
-        "first",
-        "last",
-        "first",
+        "",
+        "",
         "last",
         "last",
-        ""
+        "first",
+        "",
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer"
@@ -6719,7 +6719,7 @@
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -6729,37 +6729,37 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
-        null
+        false
       ],
       "load_eviction_policies": [
-        "last",
-        "first",
         "first",
         "last",
+        "",
         "first",
+        "",
+        "",
         "last",
-        "last",
-        ""
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
-        "pointer"
+        "tensor_descriptor"
       ],
       "pid_type": "flat",
       "split_k": 32,
@@ -6914,17 +6914,17 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
-        2
+        3
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -6938,32 +6938,32 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
         "first",
         "last",
+        "last",
         "",
-        "last",
-        "last",
-        ""
+        "first",
+        "",
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "tensor_descriptor",
-        "pointer",
         "tensor_descriptor",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "tensor_descriptor",
         "tensor_descriptor"
       ],
       "atomic_indexing": [
-        "pointer"
+        "tensor_descriptor"
       ],
       "pid_type": "flat",
-      "split_k": 16,
+      "split_k": 32,
       "swap_ab": true
     }
   },
@@ -7110,58 +7110,58 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        8,
         64
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        32
+        8
       ],
       "range_unroll_factors": [
         0,
-        4
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
         true
       ],
       "load_eviction_policies": [
+        "",
         "last",
         "",
-        "",
         "first",
-        "",
+        "first",
         "first",
         "last",
-        ""
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
       "split_k": 32,
@@ -7255,7 +7255,7 @@
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -7265,33 +7265,33 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        null
       ],
       "range_flattens": [
         null,
-        true
+        null
       ],
       "load_eviction_policies": [
-        "first",
-        "",
         "last",
         "first",
         "",
         "first",
+        "last",
+        "",
         "",
         "last"
       ],
       "num_warps": 8,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
@@ -7579,7 +7579,7 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
@@ -7590,47 +7590,47 @@
         ]
       ],
       "l2_groupings": [
-        32
+        1
       ],
       "range_unroll_factors": [
         0,
-        4
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
-        true
+        false
       ],
       "load_eviction_policies": [
-        "last",
-        "",
-        "",
-        "first",
-        "",
         "first",
         "last",
-        ""
+        "",
+        "first",
+        "first",
+        "",
+        "last",
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
       "split_k": 32,
@@ -7919,9 +7919,9 @@
       ],
       "loop_orders": [
         [
-          0,
           2,
-          1
+          1,
+          0
         ]
       ],
       "l2_groupings": [
@@ -7929,43 +7929,43 @@
       ],
       "range_unroll_factors": [
         0,
-        4
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        true
       ],
       "range_flattens": [
         null,
-        false
+        null
       ],
       "load_eviction_policies": [
-        "last",
-        "last",
-        "first",
         "first",
         "last",
         "",
+        "first",
+        "first",
+        "",
         "last",
-        "first"
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "tensor_descriptor",
         "tensor_descriptor",
         "pointer",
         "pointer",
-        "tensor_descriptor"
+        "tensor_descriptor",
+        "pointer",
+        "pointer",
+        "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
       "split_k": 32,
@@ -7992,11 +7992,11 @@
         ]
       ],
       "l2_groupings": [
-        32
+        1
       ],
       "range_unroll_factors": [
         0,
-        3
+        4
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -8006,33 +8006,33 @@
       ],
       "range_flattens": [
         null,
-        null
+        false
       ],
       "load_eviction_policies": [
         "last",
-        "",
-        "last",
         "first",
         "",
         "first",
+        "first",
+        "first",
         "last",
-        ""
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
         "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
       "split_k": 32,
@@ -8249,7 +8249,7 @@
     },
     "config": {
       "block_sizes": [
-        64,
+        32,
         64
       ],
       "loop_orders": [
@@ -8260,7 +8260,7 @@
         ]
       ],
       "l2_groupings": [
-        2
+        4
       ],
       "range_unroll_factors": [
         0,
@@ -8270,41 +8270,41 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        null
       ],
       "range_flattens": [
         null,
-        true
+        null
       ],
       "load_eviction_policies": [
-        "first",
         "",
         "last",
+        "",
+        "first",
         "first",
         "",
-        "last",
-        "last",
-        "last"
+        "first",
+        ""
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
         "tensor_descriptor",
         "tensor_descriptor",
         "tensor_descriptor",
         "pointer",
-        "tensor_descriptor",
-        "tensor_descriptor",
+        "pointer",
         "pointer",
         "tensor_descriptor",
+        "pointer",
         "tensor_descriptor"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
       "split_k": 8,
-      "swap_ab": false
+      "swap_ab": true
     }
   },
   {
@@ -8471,30 +8471,30 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
-        true
+        null
       ],
       "load_eviction_policies": [
-        "",
+        "first",
         "last",
+        "first",
         "first",
         "first",
         "last",
         "first",
-        "last",
-        "last"
+        ""
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer",
@@ -8806,34 +8806,34 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        null
+        false
       ],
       "range_flattens": [
         null,
         null
       ],
       "load_eviction_policies": [
+        "first",
+        "last",
+        "last",
+        "first",
         "",
-        "last",
-        "first",
-        "first",
-        "last",
-        "first",
-        "last",
-        "first"
+        "",
+        "",
+        ""
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
@@ -9058,17 +9058,17 @@
       ],
       "loop_orders": [
         [
-          1,
+          0,
           2,
-          0
+          1
         ]
       ],
       "l2_groupings": [
-        8
+        1
       ],
       "range_unroll_factors": [
         0,
-        0
+        3
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -9081,33 +9081,33 @@
         true
       ],
       "load_eviction_policies": [
-        "first",
-        "",
         "last",
-        "first",
         "",
         "first",
+        "first",
+        "first",
+        "first",
         "last",
-        "last"
+        ""
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 16,
+      "split_k": 8,
       "swap_ab": true
     }
   },
@@ -9192,9 +9192,9 @@
       ],
       "loop_orders": [
         [
+          1,
           2,
-          0,
-          1
+          0
         ]
       ],
       "l2_groupings": [
@@ -9202,7 +9202,7 @@
       ],
       "range_unroll_factors": [
         0,
-        1
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -9212,25 +9212,25 @@
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
         "last",
         "last",
+        "first",
+        "first",
+        "last",
         "",
-        "first",
         "last",
-        "first",
-        "last",
-        "first"
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer",
@@ -9241,7 +9241,7 @@
         "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 32,
+      "split_k": 64,
       "swap_ab": true
     }
   },
@@ -9326,13 +9326,13 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -9342,21 +9342,21 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
-        "last",
+        "",
         "first",
+        "",
         "first",
         "last",
+        "",
         "first",
-        "last",
-        "last",
-        ""
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
@@ -9364,18 +9364,18 @@
         "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
         "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer",
         "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 32,
+      "split_k": 16,
       "swap_ab": true
     }
   },
@@ -9661,13 +9661,13 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        64
+        4
       ],
       "range_unroll_factors": [
         0,
@@ -9677,40 +9677,40 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        true
       ],
       "range_flattens": [
         null,
-        null
+        false
       ],
       "load_eviction_policies": [
         "last",
-        "first",
+        "last",
+        "",
+        "",
         "first",
         "last",
         "first",
-        "last",
-        "last",
-        ""
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
         "pointer",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer"
       ],
       "atomic_indexing": [
         "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 32,
+      "split_k": 16,
       "swap_ab": true
     }
   },
@@ -9790,8 +9790,8 @@
     },
     "config": {
       "block_sizes": [
-        16,
-        64
+        32,
+        128
       ],
       "loop_orders": [
         [
@@ -9801,7 +9801,7 @@
         ]
       ],
       "l2_groupings": [
-        64
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -9811,31 +9811,31 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        true
       ],
       "range_flattens": [
         null,
-        null
+        true
       ],
       "load_eviction_policies": [
         "last",
-        "first",
-        "first",
-        "last",
-        "first",
+        "",
+        "",
         "last",
         "last",
-        ""
+        "first",
+        "",
+        "last"
       ],
-      "num_warps": 4,
+      "num_warps": 8,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer"
@@ -9868,7 +9868,7 @@
         ]
       ],
       "l2_groupings": [
-        32
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -9878,40 +9878,40 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        null
+        false
       ],
       "range_flattens": [
         null,
-        true
+        false
       ],
       "load_eviction_policies": [
         "last",
-        "first",
-        "first",
-        "first",
-        "first",
+        "",
+        "",
         "first",
         "last",
-        "first"
+        "",
+        "first",
+        ""
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 32,
+      "split_k": 16,
       "swap_ab": true
     }
   },
@@ -9925,7 +9925,7 @@
     "config": {
       "block_sizes": [
         16,
-        128
+        64
       ],
       "loop_orders": [
         [
@@ -9935,11 +9935,11 @@
         ]
       ],
       "l2_groupings": [
-        1
+        2
       ],
       "range_unroll_factors": [
         0,
-        4
+        3
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -9952,33 +9952,33 @@
         true
       ],
       "load_eviction_policies": [
-        "",
         "first",
+        "first",
+        "first",
+        "first",
+        "",
         "last",
-        "first",
-        "first",
-        "first",
-        "",
-        ""
+        "last",
+        "last"
       ],
-      "num_warps": 8,
+      "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 32,
+      "split_k": 64,
       "swap_ab": true
     }
   },
@@ -10058,22 +10058,22 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        4,
         64
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        32
+        2
       ],
       "range_unroll_factors": [
         0,
-        4
+        2
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
@@ -10083,25 +10083,25 @@
       ],
       "range_flattens": [
         null,
-        false
+        null
       ],
       "load_eviction_policies": [
-        "first",
-        "",
-        "",
-        "first",
-        "",
-        "first",
         "last",
-        ""
+        "last",
+        "",
+        "first",
+        "",
+        "last",
+        "",
+        "first"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
         "pointer",
         "pointer",
@@ -10109,10 +10109,10 @@
         "pointer"
       ],
       "atomic_indexing": [
-        "tensor_descriptor"
+        "pointer"
       ],
       "pid_type": "flat",
-      "split_k": 32,
+      "split_k": 16,
       "swap_ab": true
     }
   },
@@ -10326,18 +10326,18 @@
     },
     "config": {
       "block_sizes": [
-        16,
+        32,
         64
       ],
       "loop_orders": [
         [
-          1,
+          0,
           2,
-          0
+          1
         ]
       ],
       "l2_groupings": [
-        16
+        1
       ],
       "range_unroll_factors": [
         0,
@@ -10347,7 +10347,7 @@
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        false
+        true
       ],
       "range_flattens": [
         null,
@@ -10355,26 +10355,26 @@
       ],
       "load_eviction_policies": [
         "last",
-        "",
+        "last",
         "first",
-        "first",
-        "",
         "first",
         "last",
-        ""
+        "",
+        "",
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
@@ -10398,50 +10398,50 @@
       ],
       "loop_orders": [
         [
+          0,
           2,
-          1,
-          0
+          1
         ]
       ],
       "l2_groupings": [
-        32
+        1
       ],
       "range_unroll_factors": [
         0,
-        2
+        1
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        null
+        false
       ],
       "range_flattens": [
         null,
-        true
+        null
       ],
       "load_eviction_policies": [
-        "last",
         "first",
         "first",
         "first",
         "first",
         "first",
-        "last",
-        "first"
+        "",
+        "first",
+        "last"
       ],
       "num_warps": 4,
       "num_stages": 1,
       "indexing": [
         "pointer",
         "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
@@ -10599,23 +10599,23 @@
       ],
       "loop_orders": [
         [
-          2,
           1,
+          2,
           0
         ]
       ],
       "l2_groupings": [
-        64
+        2
       ],
       "range_unroll_factors": [
         0,
-        2
+        3
       ],
       "range_warp_specializes": [],
       "range_num_stages": [],
       "range_multi_buffers": [
         null,
-        true
+        null
       ],
       "range_flattens": [
         null,
@@ -10623,26 +10623,26 @@
       ],
       "load_eviction_policies": [
         "first",
+        "first",
+        "first",
+        "first",
         "",
         "last",
-        "first",
-        "",
-        "first",
-        "",
+        "last",
         "last"
       ],
-      "num_warps": 8,
+      "num_warps": 4,
       "num_stages": 1,
       "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
         "pointer",
+        "tensor_descriptor",
         "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+        "tensor_descriptor",
+        "tensor_descriptor"
       ],
       "atomic_indexing": [
         "pointer"
