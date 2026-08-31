@@ -152,11 +152,13 @@ class ConfiguredHelionKernel:
         config_picker: ConfigPicker | None,
         raw_kernel_func: Callable,
         helion_settings: helion.Settings | None = None,
+        use_variant_config: bool = False,
     ):
         self.op_name = op_name
         self.config_picker = config_picker
         self.raw_kernel_func = raw_kernel_func
         self.helion_settings = helion_settings
+        self.use_variant_config = use_variant_config
         self._decorated_kernel = self._create_decorated_kernel()
 
     def __call__(self, *args, **kwargs):
@@ -217,9 +219,9 @@ class ConfiguredHelionKernel:
 
     def _load_platform_configs(self) -> None:
         from vllm.kernels.helion.config_manager import ConfigManager
-        from vllm.kernels.helion.utils import get_canonical_gpu_name
+        from vllm.kernels.helion.utils import get_config_gpu_name
 
-        self.platform = get_canonical_gpu_name()
+        self.platform = get_config_gpu_name(self.use_variant_config)
         config_manager = ConfigManager()
         self.configs = config_manager.get_platform_configs(self.op_name, self.platform)
 
@@ -262,6 +264,7 @@ class HelionKernelWrapper:
         mutates_args: list[str] | None = None,
         helion_settings: helion.Settings | None = None,
         input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+        use_variant_config: bool = False,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
@@ -273,6 +276,7 @@ class HelionKernelWrapper:
         self._config_picker = config_picker
         self._input_generator = input_generator
         self._mutates_args = mutates_args
+        self.use_variant_config = use_variant_config
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
         # which handles op enablement/disablement.
@@ -345,6 +349,7 @@ class HelionKernelWrapper:
                 config_picker=self._config_picker,
                 raw_kernel_func=self.raw_kernel_func,
                 helion_settings=self.helion_settings,
+                use_variant_config=self.use_variant_config,
             )
         return self._configured_kernel
 
@@ -406,6 +411,7 @@ def register_kernel(
     mutates_args: list[str] | None = None,
     helion_settings: helion.Settings | None = None,
     input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+    use_variant_config: bool = False,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
@@ -438,6 +444,11 @@ def register_kernel(
                         "8192": (torch.randn(8192, device="cuda"), 0.5),
                     }
 
+        use_variant_config: Optional. When ``True``, configs are
+            looked up by the variant-specific GPU name (e.g.
+            ``nvidia_h100_pcie``) instead of the canonical name shared by all
+            variants (e.g. ``nvidia_h100``). Defaults to ``False``, which
+            preserves the canonical-name lookup used by most kernels.
     """
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
@@ -469,6 +480,7 @@ def register_kernel(
             mutates_args=mutates_args,
             helion_settings=helion_settings,
             input_generator=input_generator,
+            use_variant_config=use_variant_config,
         )
 
         _REGISTERED_KERNELS[final_op_name] = kernel_wrapper
