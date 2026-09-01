@@ -21,90 +21,132 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ## About
 
-vLLM is a fast and easy-to-use library for LLM inference and serving.
+This fork contains vLLM Helion integration and kernel work that has not yet been upstreamed to the main vLLM repository.
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has grown into one of the most active open-source AI projects built and maintained by a diverse community of many dozens of academic institutions and companies from over 2000 contributors.
+## Installation
 
-vLLM is fast with:
+Some changes in this fork modify C++ kernels and have not yet been upstreamed. As a result, `VLLM_USE_PRECOMPILED` is not sufficient, and vLLM must be built from source.
 
-- State-of-the-art serving throughput
-- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
-- Continuous batching of incoming requests, chunked prefill, prefix caching
-- Fast and flexible model execution with piecewise and full CUDA/HIP graphs
-- Quantization: FP8, MXFP8/MXFP4, NVFP4, INT8, INT4, GPTQ/AWQ, GGUF, compressed-tensors, ModelOpt, TorchAO, and [more](https://docs.vllm.ai/en/latest/features/quantization/index.html)
-- Optimized attention kernels including FlashAttention, FlashInfer, TRTLLM-GEN, FlashMLA, and Triton
-- Optimized GEMM/MoE kernels for various precisions using CUTLASS, TRTLLM-GEN, CuTeDSL
-- Speculative decoding including n-gram, suffix, EAGLE, DFlash
-- Automatic kernel generation and graph-level transformations using torch.compile
-- Disaggregated prefill, decode, and encode
+Follow the vLLM development installation instructions: <https://docs.vllm.ai/en/latest/contributing/#developing>.
 
-vLLM is flexible and easy to use with:
+## Helion Linear Backend
 
-- Seamless integration with popular Hugging Face models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor, pipeline, data, expert, and context parallelism for distributed inference
-- Streaming outputs
-- Generation of structured outputs using xgrammar or guidance
-- Tool calling and reasoning parsers
-- OpenAI-compatible API server, plus Anthropic Messages API and gRPC support
-- Efficient multi-LoRA support for dense and MoE layers
-- Support for NVIDIA GPUs, AMD GPUs, Intel GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
+### Prerequisites
 
-vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
+- [Helion](https://github.com/pytorch/helion) installed with the required [commit](https://github.com/pytorch/helion/pull/3452) included.
+- An NVIDIA Hopper GPU, such as H100.
 
-- Decoder-only LLMs (e.g., Llama, Qwen, Gemma)
-- Mixture-of-Expert LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
-- Hybrid attention and state-space models (e.g., Mamba, Qwen3.5)
-- Multi-modal models (e.g., LLaVA, Qwen-VL, Pixtral)
-- Embedding and retrieval models (e.g., E5-Mistral, GTE, ColBERT)
-- Reward and classification models (e.g., Qwen-Math)
+### Quickstart
 
-Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
-
-## Getting Started
-
-Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
+Use `--linear-backend helion` to enable the Helion linear backend:
 
 ```bash
-uv pip install vllm
+vllm serve \
+    --model Qwen/Qwen3.8-27B-FP8 \
+    --max-num-seqs 32 \
+    --tensor-parallel-size 1 \
+    --linear-backend helion
 ```
 
-Or [build from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for development.
+### Supported Quantization Formats
 
-Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
+The Helion linear backend currently supports the following quantization formats:
 
-- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
-- [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
-- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
+- **FP8_Dynamic**: FP8 per-token activation and per-channel weight scaling. e.g., [AzatAI/Qwen3.8-27B-FP8-dynamic](https://huggingface.co/AzatAI/Qwen3.8-27B-FP8-dynamic).
+- **W8A8_INT8**: INT8 per-token activation and per-channel weight scaling. e.g., [Freaksterz/Qwen3.8-27B-SmoothQuant-W8A8-INT8](https://huggingface.co/Freaksterz/Qwen3.8-27B-SmoothQuant-W8A8-INT8).
+- **Block_FP8**: FP8 with 1×128 activation scaling and 128×128 weight scaling. Uses `HelionFP8BlockScaledMMLinearKernel`. e.g., [Qwen/Qwen3.8-27B-FP8](https://huggingface.co/Qwen/Qwen3.8-27B-FP8).
 
-## Contributing
+### Quantized GEMM Kernels
 
-We welcome and value any contributions and collaborations.
-Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contributing/index.html) for how to get involved.
+The Helion linear backend uses the following quantized GEMM kernels:
 
-## Citation
+- [`scaled_mm`](vllm/kernels/helion/ops/scaled_mm.py): used for **FP8_Dynamic** and **W8A8_INT8** quantization formats
+- [`block_scaled_mm`](vllm/kernels/helion/ops/block_scaled_mm.py): used for **Block_FP8** quantization format
 
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
+### Benchmark
 
-```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
-}
+End-to-end throughput speedup of the Helion linear backend over the default backend on an H100, across models and batch sizes for each supported quantization format:
+
+![Helion Linear Backend End-to-End Throughput Speedup](helion_throughput_heatmap.png)
+
+### Pretuned Configs
+
+Pretuned configs for the [`scaled_mm`](vllm/kernels/helion/ops/scaled_mm.py) and [`block_scaled_mm`](vllm/kernels/helion/ops/block_scaled_mm.py) kernels on H100 are stored in:
+
+- [`vllm/kernels/helion/configs/scaled_mm/nvidia_h100_80gb_hbm3.json`](vllm/kernels/helion/configs/scaled_mm/nvidia_h100_80gb_hbm3.json)
+- [`vllm/kernels/helion/configs/block_scaled_mm/nvidia_h100_80gb_hbm3.json`](vllm/kernels/helion/configs/block_scaled_mm/nvidia_h100_80gb_hbm3.json)
+
+The shipped configs cover the following models:
+
+- Qwen/Qwen3.8-27B
+- Qwen/Qwen3-1.7B
+- Qwen/Qwen3-4B
+- Qwen/Qwen3-8B
+- Qwen/Qwen3-14B
+- Qwen/Qwen3-32B
+
+### Autotuning
+
+For models not covered by the shipped pretuned configs, the vLLM server will fail to start when the Helion linear backend is enabled. Users must run AOT autotuning to generate configs for their specific workloads.
+
+#### Identify Missing Configs
+
+Start the vLLM server with `VLLM_HELION_LINEAR_SKIP_CONFIG_CHECK=1`:
+
+```bash
+VLLM_HELION_LINEAR_SKIP_CONFIG_CHECK=1 vllm serve \
+    --model Qwen/Qwen3.8-27B-FP8 \
+    --max-num-seqs 32 \
+    --tensor-parallel-size 1 \
+    --linear-backend helion
 ```
 
-## Contact Us
+This bypasses the config coverage check, allowing the server to run with the closest available configs. Warning messages will identify shapes for which pretuned configs are missing.
 
-<!-- --8<-- [start:contact-us] -->
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues)
-- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
-- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
-- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
-- For collaborations and partnerships, please contact us at [collaboration@vllm.ai](mailto:collaboration@vllm.ai)
-<!-- --8<-- [end:contact-us] -->
+For example:
 
-## Media Kit
+> Helion scaled_mm has no pre-tuned config for weight shape (K=2048, N=12288) with in_dtype=torch.float8_e4m3fn at M=[1, 2, 4, 8, 16, 24, 32]. Running anyway with the closest available config.
 
-- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+#### Update the Kernel Input Generator
+
+Update `generate_inputs` for the corresponding quantized GEMM kernel to include the missing shapes reported in the warning logs:
+
+- [`scaled_mm`](vllm/kernels/helion/ops/scaled_mm.py): used for **FP8_Dynamic** and **W8A8_INT8** quantization formats
+- [`block_scaled_mm`](vllm/kernels/helion/ops/block_scaled_mm.py): used for **Block_FP8** quantization format
+
+#### Run AOT Autotuning
+
+Run the Helion autotuning script to generate optimized configs:
+
+```bash
+HELION_BENCHMARK_CUDAGRAPH=1 \
+python scripts/autotune_helion_kernels.py \
+    --kernels scaled_mm block_scaled_mm \
+    --autotune-effort "full"
+```
+
+Full autotuning can take several hours, depending on the number of input shapes.
+
+When an LLM provider is available, LLM-assisted autotuning is also recommended to improve the search process. For example, with AWS Bedrock, after configuring the required AWS credentials:
+
+```bash
+HELION_LLM_PROVIDER=bedrock \
+HELION_LLM_MODEL=us.anthropic.claude-opus-4-8 \
+HELION_AUTOTUNER=LLMSeededLFBOTreeSearch \
+HELION_BENCHMARK_CUDAGRAPH=1 \
+python scripts/autotune_helion_kernels.py \
+    --kernels scaled_mm block_scaled_mm \
+    --autotune-effort "full"
+```
+
+## Feedback and Contact
+
+### Helion linear backend
+
+For questions, issues, or feedback about the Helion linear backend, please leave a comment on the vLLM Helion linear backend [RFC](https://github.com/vllm-project/vllm/issues/46526).
+
+**Contributors**: [@xiaohongchen1991](https://github.com/xiaohongchen1991), [@yushangdi](https://github.com/yushangdi)
+
+### Helion General
+
+For general Helion questions and discussions, join us in the #helion channel on the [GPU MODE Discord](https://discord.gg/gpumode).
