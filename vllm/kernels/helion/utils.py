@@ -104,3 +104,26 @@ def get_int8_min_max() -> tuple[int, int]:
 
 def get_int8_min_scaling_factor() -> float:
     return torch.finfo(torch.float32).eps
+
+
+def simulate_expert_counts(num_tokens: int, num_experts: int, top_k: int) -> list[int]:
+    """Per-expert token counts from a simulated uniform router.
+
+    Draws Gaussian gating logits and selects top_k experts per token, yielding a
+    realistic top-k multinomial distribution with small-batch imbalance and
+    empty experts rather than a deterministic even split. Selection matches
+    ``fused_topk`` (softmax scoring is monotonic, so it does not change which
+    experts win). Seeded per shape so autotuning inputs are reproducible.
+    """
+    from torch._subclasses.fake_tensor import unset_fake_temporarily
+
+    # Runs eagerly to produce concrete counts even when the autotuner traces
+    # under FakeTensorMode (bincount has a data-dependent output shape).
+    with unset_fake_temporarily():
+        gen = torch.Generator(device="cuda").manual_seed(
+            num_tokens * 1000 + num_experts * 10 + top_k
+        )
+        gating = torch.randn(num_tokens, num_experts, device="cuda", generator=gen)
+        topk_ids = gating.topk(top_k, dim=-1).indices
+        counts = torch.bincount(topk_ids.reshape(-1), minlength=num_experts)
+        return counts.tolist()

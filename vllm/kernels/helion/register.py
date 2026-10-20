@@ -60,6 +60,8 @@ from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
+from vllm.kernels.helion.composite import CompositeKernel
+
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
 # vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
 # FIXME(gmagogsfm): Re-enable HOP path once performance regression is fixed.
@@ -238,6 +240,34 @@ class ConfiguredHelionKernel:
         key_computer = self._create_key_computer()
         config_selector = self._create_config_selector(key_computer)
 
+        from vllm.kernels.helion.composite import (
+            _joint_dict,
+            body_signature,
+            is_composite_body,
+        )
+
+        if is_composite_body(self.raw_kernel_func):
+            # Composite kernel: dispatch binds the child helion kernels lazily
+            # per call and runs each site on its section of the selected joint
+            # config ({"root": ..., "children": {...}}). The runner's outward
+            # signature is the body minus its `run` parameter, matching the
+            # registered custom op's schema.
+            composite = CompositeKernel(
+                self.raw_kernel_func, settings=self.helion_settings
+            )
+            runner_cache: dict[str, Callable] = {}
+
+            def composite_runner(*args: Any) -> Any:
+                key = key_computer(*args)
+                runner = runner_cache.get(key)
+                if runner is None:
+                    runner = composite.configure(_joint_dict(config_selector(args)))
+                    runner_cache[key] = runner
+                return runner(*args)
+
+            composite_runner.__signature__ = body_signature(self.raw_kernel_func)  # type: ignore[attr-defined]
+            return composite_runner
+
         extra_kwargs = {
             "autotuner_fn": lambda _, args: PresetConfigSearch(args, config_selector),
             "key": key_computer,
@@ -330,6 +360,17 @@ class HelionKernelWrapper:
         autotune_effort: str = "quick",
     ) -> Config:
         """Run autotuning for a single input configuration."""
+        from vllm.kernels.helion.composite import is_composite_body
+
+        if is_composite_body(self.raw_kernel_func):
+            # Composite kernel: search the joint (root tunables + per-call-site
+            # child configs) space with helion's own LFBOTreeSearch, measuring
+            # every candidate by running the whole body.
+            composite = CompositeKernel(
+                self.raw_kernel_func, settings=self.helion_settings
+            )
+            return composite.autotune(inputs, autotune_effort=autotune_effort)
+
         extra_kwargs = {
             "autotune_effort": autotune_effort,
             "autotune_ignore_errors": True,
