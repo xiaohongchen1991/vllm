@@ -17,7 +17,8 @@ coefficient in its epilogue (Triton's ``mul_routed_weight``), and
 the complete MoE layer end to end, mirroring ``TritonExperts.apply`` (and the
 custom Triton baseline).
 
-``permuted`` and ``m_block_size`` are root tunables (``run.tunable``).
+``permuted``, ``fuse_moe_sum`` and ``m_block_size`` are root tunables
+(``run.tunable``).
 ``m_block_size`` is the alignment block size -- the routed rows of one
 aligned block, shared by ``moe_align_block_size`` and both GEMM sites
 (Triton fused_moe's ``BLOCK_SIZE_M``); its default keeps the
@@ -33,6 +34,12 @@ them through ``inv_perm``. GEMM1 also stores its gate_up output permuted
 weighted output to the routed slots' token-order rows, so the top-k combine
 is always a contiguous ``moe_sum``. The autotuner explores both
 layouts per shape and keeps the faster.
+``fuse_moe_sum`` folds that combine into GEMM2's store instead: each
+weighted routed row atomically accumulates into its token's row of the
+[num_tokens, H] layer output (pre-zeroed by the kernel), replacing the
+mm2_out staging cache and the separate ``moe_sum`` launch -- trading a
+deterministic reduction for one fewer kernel and no [routed, H] round trip.
+The gate_up projection never combines, so GEMM1 always passes False.
 
 The interface is the fused ``fused_moe_block_mm`` interface plus
 ``topk_weights`` (inserted before ``topk_ids``), with the layer-level
@@ -51,12 +58,16 @@ consume that alignment) and resizes the preallocated workspace
 caches like the Triton baseline -- ``workspace2`` to the bf16 gate_up cache
 [num_tokens, top_k, N] (TritonExperts' intermediate_cache1) and ``workspace13``
 to the bf16 weighted GEMM2 output [num_tokens, top_k, H]. At
-``m_block_size == 1`` (the default when ``num_tokens == 1``) the alignment is
-skipped entirely: every routed slot is its own block, so the GEMMs take the
-dense layout (``sorted_token_ids=None``) and derive slot = block in-kernel
-(Triton fused_moe's ``naive_block_assignment``), with ``expert_ids`` the flat
-``topk_ids`` view -- no align kernel, no identity arange, no alignment
-tensors. Everything
+``m_block_size == 1`` the alignment is skipped: every routed slot is its own
+block, so the GEMMs take the dense layout (``sorted_token_ids=None``) and
+derive slot = block in-kernel (Triton fused_moe's
+``naive_block_assignment``), with ``expert_ids`` the flat ``topk_ids`` view.
+The routing also produces the actual padded routed-slot count
+(``num_tokens_post_padded``, a [1] device tensor from moe_align /
+moe_route / the dense-path synthesis): the align producers -1-fill the
+``expert_ids`` tail beyond it, so the GEMMs' ``e >= 0`` branch skips the
+worst-case tail blocks, and the count gates the off-rank zero-fill to
+blocks whose rows moe_sum actually reads. Everything
 runs on-device with no host sync, so the composite is **CUDA-graph
 compatible**.
 """
@@ -151,7 +162,7 @@ def _(
     ],
 )
 def moe_block_mm(
-    output: torch.Tensor,  # [num_tokens * top_k, N] (out)
+    output: torch.Tensor,  # [routed, N] (out; [num_tokens, N] when fuse_moe_sum)
     aq: torch.Tensor,  # [M, K] fp8; M = num_tokens or num_tokens * top_k
     aq_scale: torch.Tensor,  # [M, K // 128]
     w: torch.Tensor,  # [E, N, K] fp8
@@ -160,9 +171,11 @@ def moe_block_mm(
     expert_ids: torch.Tensor,  # align output, int32
     num_tokens: int,
     top_k: int,  # real model top_k (routed experts per token)
-    align_block_size: int,  # align block size: routed rows per aligned block
+    align_block_size: hl.constexpr,  # align block size: routed rows per aligned block
+    num_tokens_post_padded: torch.Tensor,  # [1] int32: padded routed-slot count
     topk_weights: torch.Tensor | None = None,  # [num_tokens, top_k] routed weights
     inv_perm: torch.Tensor | None = None,  # [routed] slot -> permuted row
+    fuse_moe_sum: hl.constexpr = False,  # accumulate into the [num_tokens, N] output
 ) -> None:
     M, K = aq.shape
     E, N = w.shape[0], w.shape[1]
@@ -173,8 +186,6 @@ def moe_block_mm(
     hl.specialize(E)
     hl.specialize(N)
     hl.specialize(top_k)
-    hl.specialize(num_tokens)
-    hl.specialize(align_block_size)
 
     # Each activation row serves slots_per_row consecutive routed slots: top_k
     # when aq holds one row per token (the unpermuted gate_up projection), 1
@@ -184,7 +195,14 @@ def moe_block_mm(
     assert slots_per_row >= 1 and slots_per_row * M == routed
 
     assert w.shape == (E, N, K)
-    assert output.shape == (routed, N)
+    if fuse_moe_sum:
+        # Fused combine (the down projection only): output is the
+        # [num_tokens, N] layer output; each weighted routed row accumulates
+        # into its token's row.
+        assert topk_weights is not None
+        assert output.shape == (num_tokens, N)
+    else:
+        assert output.shape == (routed, N)
     assert aq.dtype == w.dtype
     assert output.dtype.is_floating_point
     assert aq.stride(1) == 1
@@ -228,6 +246,12 @@ def moe_block_mm(
         assert sorted_token_ids.ndim == 1
         assert sorted_token_ids.dtype == torch.int32
 
+    # The routing's actual padded routed-slot count: stays on the device (the
+    # grid is sized from the worst-case buffers; the count only prunes
+    # in-kernel), so the composite keeps CUDA-graph compatibility.
+    assert num_tokens_post_padded.dtype == torch.int32
+    assert num_tokens_post_padded.numel() == 1
+
     assert aq_scale.ndim == 2 and w_scale.ndim == 3
     assert aq_scale.dtype == w_scale.dtype and aq_scale.is_floating_point()
 
@@ -256,9 +280,12 @@ def moe_block_mm(
     # Routing contract: the caller aligned at block_size = align_block_size (passed
     # in and specialized), so each aligned block holds routed rows of exactly
     # one expert (real rows at the head, padding after) and expert_ids holds
-    # the active experts in ascending order followed by a -1 tail. max_padded /
-    # num_blocks are runtime sizes of the caller's align outputs and are never
-    # specialized. sorted_token_ids=None selects the dense layout instead
+    # the active experts in ascending order followed by a -1 tail. The grid
+    # covers the worst-case buffers (num_blocks = expert_ids.size(0), the
+    # tight host-computable bound); num_tokens_post_padded, the actual
+    # per-batch count, stays on device -- the -1 tail already skips the
+    # beyond-count blocks, and the count gates the zero-fill branch.
+    # sorted_token_ids=None selects the dense layout instead
     # (Triton fused_moe's naive_block_assignment): block b is routed slot b
     # with no padding, the slot mapping is derived in-kernel, and expert_ids is
     # the caller's flat topk_ids view.
@@ -277,7 +304,9 @@ def moe_block_mm(
         "split_k", PowerOfTwoFragment(1, helion.next_power_of_2(num_group_k))
     )
     k_block_size = helion.next_power_of_2(helion.cdiv(K, split_k))
-    if split_k > 1:
+    # split_k partials and the fused moe_sum store both accumulate, so both
+    # need a zeroed output.
+    if split_k > 1 or (apply_weights and fuse_moe_sum):
         output.zero_()
 
     for tile_e, tile_m, tile_n, outer_k in hl.tile(
@@ -285,118 +314,166 @@ def moe_block_mm(
         block_size=[1, None, None, k_block_size],
     ):
         blk = tile_e.begin
-        e = expert_ids[blk]
+        ntp = num_tokens_post_padded[0]
 
-        rows = blk * align_block_size + tile_m.index
-        if sorted_token_ids is None:
-            # Dense layout: block b is routed slot b, derived
-            # arithmetically -- no sorted-ids load, no padding.
-            offs_token = rows
-            token_mask = rows < routed
-        else:
-            row_mask = rows < max_padded
-            offs_token = hl.load(sorted_token_ids, [rows], extra_mask=row_mask)
-            token_mask = row_mask & (offs_token < routed)
+        if blk * align_block_size < ntp:
+            e = expert_ids[blk]
+            rows = blk * align_block_size + tile_m.index
+            if sorted_token_ids is None:
+                # Dense layout: block b is routed slot b, derived
+                # arithmetically -- no sorted-ids load, no padding.
+                offs_token = rows
+                token_mask = rows < routed
+            else:
+                row_mask = rows < max_padded
+                offs_token = hl.load(sorted_token_ids, [rows], extra_mask=row_mask)
+                token_mask = row_mask & (offs_token < routed)
 
-        # The permuted / unpermuted split keys on inv_perm's presence:
-        # None checks resolve at trace time, so only the taken layout is
-        # traced and the compiled code has no branch on the mode at all.
-        if inv_perm is not None:
-            # aq is in moe_permute's expert-major order: permuted row
-            # inv_perm[s] holds routed slot s, so the activation gather
-            # goes through inv_perm (masked lanes load 0). The gate_up
-            # projection stores permuted as well (contiguous per expert);
-            # the down projection lands on the routed slot's token-order
-            # row so the combine is a contiguous moe_sum.
-            inv_rows = hl.load(
-                inv_perm,
-                [torch.where(token_mask, offs_token, 0)],
-                extra_mask=token_mask,
-            )
-            aq_rows = inv_rows
-            store_rows = offs_token if apply_weights else inv_rows
-        else:
-            # Routed slot offs_token reads activation row offs_token //
-            # slots_per_row (the token's row for the per-token gate_up
-            # layout; the identity for per-slot activations) and writes
-            # output row offs_token.
-            aq_rows = torch.where(token_mask, offs_token // slots_per_row, 0)
-            store_rows = offs_token
+            if e >= 0:
+                # The permuted / unpermuted split keys on inv_perm's presence:
+                # None checks resolve at trace time, so only the taken layout is
+                # traced and the compiled code has no branch on the mode at all.
+                if inv_perm is not None:
+                    # aq is in moe_permute's expert-major order: permuted row
+                    # inv_perm[s] holds routed slot s, so the activation gather
+                    # goes through inv_perm (masked lanes load 0). The gate_up
+                    # projection stores permuted as well (contiguous per expert);
+                    # the down projection lands on the routed slot's token-order
+                    # row so the combine is a contiguous moe_sum.
+                    inv_rows = hl.load(
+                        inv_perm,
+                        [torch.where(token_mask, offs_token, 0)],
+                        extra_mask=token_mask,
+                    )
+                    aq_rows = inv_rows
+                    store_rows = offs_token if apply_weights else inv_rows
+                else:
+                    # Routed slot offs_token reads activation row offs_token //
+                    # slots_per_row (the token's row for the per-token gate_up
+                    # layout; the identity for per-slot activations) and writes
+                    # output row offs_token.
+                    aq_rows = torch.where(token_mask, offs_token // slots_per_row, 0)
+                    store_rows = offs_token
 
-        # Skip fully-padded blocks: moe_align fills the expert_ids tail with
-        # -1 (and expert_map marks off-rank experts -1), so this is Triton's
-        # `off_experts == -1` early return. `e` is program-uniform, so the
-        # branch drops the whole MMA for no-op tiles without lane divergence.
-        if e >= 0:
-            acc = hl.zeros([tile_m, tile_n], torch.float32)
+                if fuse_moe_sum:
+                    # The combine target is the token's row in the
+                    # [num_tokens, N] layer output.
+                    store_rows = offs_token // top_k
 
-            # Keep block_size = group_k for the K dimension so the block scale
-            # is constant across each inner tile.
-            for tile_k in hl.tile(outer_k.begin, outer_k.end, block_size=group_k):
-                aq_blk = hl.load(aq, [aq_rows, tile_k], extra_mask=token_mask[:, None])
-                w_blk = w[e, tile_n, tile_k]
+                acc = hl.zeros([tile_m, tile_n], torch.float32)
 
-                if swap_ab:
-                    acc_blk = (
-                        hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
-                        .t()
-                        .to(torch.float32)
+                # Keep block_size = group_k for the K dimension so the block scale
+                # is constant across each inner tile.
+                for tile_k in hl.tile(outer_k.begin, outer_k.end, block_size=group_k):
+                    aq_blk = hl.load(
+                        aq, [aq_rows, tile_k], extra_mask=token_mask[:, None]
+                    )
+                    w_blk = w[e, tile_n, tile_k]
+
+                    if swap_ab:
+                        acc_blk = (
+                            hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
+                            .t()
+                            .to(torch.float32)
+                        )
+                    else:
+                        acc_blk = hl.dot(aq_blk, w_blk.t(), out_dtype=acc_dtype).to(
+                            torch.float32
+                        )
+
+                    gk_idx = tile_k.id
+                    aq_scale_blk = hl.load(
+                        aq_scale,
+                        [aq_rows, gk_idx + hl.arange(1)],
+                        extra_mask=token_mask[:, None],
+                    )
+                    w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][None, :]
+                    acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
+
+                # Routed weight per output row (Triton's mul_routed_weight),
+                # indexed by the routed slot (aq_rows would be wrong in the
+                # permuted layout, where it holds permuted rows). Split-K partials
+                # are disjoint K-slices of the same output row, so weighting each
+                # partial equals weighting the total: sum_k(w * P_k) == w * P.
+                if apply_weights:
+                    weight_blk = hl.load(
+                        topk_weights_flat,
+                        [torch.where(token_mask, offs_token, 0)],
+                        extra_mask=token_mask,
+                    )
+                    acc = acc * weight_blk[:, None]
+
+                if fuse_moe_sum:
+                    # The top_k combine folded into the store: each weighted
+                    # routed row accumulates into its token's output row,
+                    # replacing the separate moe_sum. The output was
+                    # pre-zeroed above; split_k partials are disjoint
+                    # K-slices of the same row, so they accumulate the same
+                    # way (sum_k w * P_k == w * P). Masked lanes contribute 0
+                    # (their loads are masked), so redirect their atomic to a
+                    # valid row like the split_k path below.
+                    hl.atomic_add(
+                        output,
+                        [torch.where(token_mask, store_rows, 0), tile_n],
+                        acc.to(out_dtype),
+                    )
+                elif split_k == 1:
+                    hl.store(
+                        output,
+                        [store_rows, tile_n],
+                        acc.to(out_dtype),
+                        extra_mask=token_mask[:, None],
                     )
                 else:
-                    acc_blk = hl.dot(aq_blk, w_blk.t(), out_dtype=acc_dtype).to(
-                        torch.float32
+                    # Masked lanes contribute 0 (their aq / scale loads are masked
+                    # to 0), so redirect their atomic to a valid row.
+                    hl.atomic_add(
+                        output,
+                        [torch.where(token_mask, store_rows, 0), tile_n],
+                        acc.to(out_dtype),
                     )
+            elif apply_weights and split_k == 1 and not fuse_moe_sum:
+                # The permuted / unpermuted split keys on inv_perm's presence:
+                # None checks resolve at trace time, so only the taken layout is
+                # traced and the compiled code has no branch on the mode at all.
+                if inv_perm is not None:
+                    # aq is in moe_permute's expert-major order: permuted row
+                    # inv_perm[s] holds routed slot s, so the activation gather
+                    # goes through inv_perm (masked lanes load 0). The gate_up
+                    # projection stores permuted as well (contiguous per expert);
+                    # the down projection lands on the routed slot's token-order
+                    # row so the combine is a contiguous moe_sum.
+                    inv_rows = hl.load(
+                        inv_perm,
+                        [torch.where(token_mask, offs_token, 0)],
+                        extra_mask=token_mask,
+                    )
+                    aq_rows = inv_rows
+                    store_rows = offs_token if apply_weights else inv_rows
+                else:
+                    # Routed slot offs_token reads activation row offs_token //
+                    # slots_per_row (the token's row for the per-token gate_up
+                    # layout; the identity for per-slot activations) and writes
+                    # output row offs_token.
+                    aq_rows = torch.where(token_mask, offs_token // slots_per_row, 0)
+                    store_rows = offs_token
 
-                gk_idx = tile_k.id
-                aq_scale_blk = hl.load(
-                    aq_scale,
-                    [aq_rows, gk_idx + hl.arange(1)],
-                    extra_mask=token_mask[:, None],
-                )
-                w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][None, :]
-                acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
-
-            # Routed weight per output row (Triton's mul_routed_weight),
-            # indexed by the routed slot (aq_rows would be wrong in the
-            # permuted layout, where it holds permuted rows). Split-K partials
-            # are disjoint K-slices of the same output row, so weighting each
-            # partial equals weighting the total: sum_k(w * P_k) == w * P.
-            if apply_weights:
-                weight_blk = hl.load(
-                    topk_weights_flat,
-                    [torch.where(token_mask, offs_token, 0)],
-                    extra_mask=token_mask,
-                )
-                acc = acc * weight_blk[:, None]
-
-            if split_k == 1:
+                # Off-rank block within the actual count (the only call site
+                # that passes topk_weights): zero its output rows (Triton's
+                # write_zeros_to_output) so the moe_sum combine reads defined
+                # zeros for off-rank slots. The gate_up projection skips
+                # entirely -- GEMM2 skips the same blocks, so its unwritten rows
+                # are never read. Blocks beyond the count are excluded: their
+                # rows are padding markers moe_sum never reads. split_k > 1
+                # pre-zeroes the whole output, and the fused combine skips
+                # this too: the pre-zeroed output already holds the zeros,
+                # and an atomic zero-contribution would be a no-op anyway.
                 hl.store(
                     output,
                     [store_rows, tile_n],
-                    acc.to(out_dtype),
+                    hl.zeros([tile_m, tile_n], out_dtype),
                     extra_mask=token_mask[:, None],
                 )
-            else:
-                # Masked lanes contribute 0 (their aq / scale loads are masked
-                # to 0), so redirect their atomic to a valid row.
-                hl.atomic_add(
-                    output,
-                    [torch.where(token_mask, store_rows, 0), tile_n],
-                    acc.to(out_dtype),
-                )
-        elif apply_weights and split_k == 1:
-            # Off-rank / fully-padded block in the down projection (the only
-            # call site that passes topk_weights): zero its output rows
-            # (Triton's write_zeros_to_output) so the moe_sum combine reads
-            # defined zeros for off-rank slots. The gate_up projection skips
-            # entirely -- GEMM2 skips the same blocks, so its unwritten rows
-            # are never read. split_k > 1 pre-zeroes the whole output.
-            hl.store(
-                output,
-                [store_rows, tile_n],
-                hl.zeros([tile_m, tile_n], out_dtype),
-                extra_mask=token_mask[:, None],
-            )
 
 
 def _align_routing(
@@ -404,25 +481,29 @@ def _align_routing(
     expert_map: torch.Tensor | None,
     global_num_experts: int,
     block_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Align the routing once for both GEMMs at ``block_size``, so each
     aligned block holds routed rows of exactly one expert.
 
     At block_size == 1 (and no expert_map) the alignment is skipped: every
-    routed slot is its own block, so the identity layout (block p = slot p,
-    expert = topk_ids[p]) satisfies the stage contract. The GEMM only reads
-    ``expert_ids[blk]``, so block order does not matter.
+    routed slot is its own block, so the dense layout (sorted_token_ids=None,
+    expert = topk_ids[p]) satisfies the stage contract, and the padded count
+    is synthesized like ``_prepare_expert_assignment``'s naive path. The GEMM
+    only reads ``expert_ids[blk]``, so block order does not matter.
     """
     if block_size == 1 and expert_map is None:
         return (
-            torch.arange(topk_ids.numel(), dtype=torch.int32, device=topk_ids.device),
-            topk_ids.reshape(-1),
+            None,
+            topk_ids.view(-1),
+            torch.full(
+                (1,),
+                topk_ids.numel() * block_size,
+                dtype=torch.int32,
+                device=topk_ids.device,
+            ),
         )
 
-    sorted_token_ids, expert_ids, _ = moe_align_block_size(
-        topk_ids, block_size, global_num_experts, expert_map
-    )
-    return sorted_token_ids, expert_ids
+    return moe_align_block_size(topk_ids, block_size, global_num_experts, expert_map)
 
 
 def _simulate_topk_ids(num_tokens: int, E: int, top_k: int) -> torch.Tensor:
@@ -703,9 +784,16 @@ def baseline(
     # at its own block size; the layer output is invariant to the layout.
     gate_up = torch.empty((routed, N), dtype=output.dtype, device=hidden_states.device)
     align_block_size = helion.next_power_of_2(num_tokens)
-    sorted_token_ids, expert_ids = _align_routing(
+    sorted_token_ids, expert_ids, _ = _align_routing(
         topk_ids, expert_map, global_num_experts, align_block_size
     )
+    if sorted_token_ids is None:
+        # Dense layout (align_block_size == 1): block b is routed slot b.
+        # Materialize the identity mapping so the loops below stay
+        # layout-agnostic.
+        sorted_token_ids = torch.arange(
+            routed, dtype=torch.int32, device=hidden_states.device
+        )
     max_padded = sorted_token_ids.numel()
     a_deq = hidden_states.to(torch.float32) * a1q_scale.to(
         torch.float32
@@ -815,8 +903,8 @@ def mega_moe_block_mm(
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
 ) -> None:
-    permuted = run.tunable("permuted", BooleanFragment())
-    # permuted = True
+    unpermuted = run.tunable("unpermuted", BooleanFragment())
+    # unpermuted = False
     num_tokens = hidden_states.shape[0]
     top_k = topk_ids.shape[1]
     N = w1.shape[1]
@@ -825,26 +913,38 @@ def mega_moe_block_mm(
 
     align_block_size = run.tunable(
         "align_block_size",
-        PowerOfTwoFragment(1, helion.next_power_of_2(num_tokens), default_val=1),
+        PowerOfTwoFragment(
+            1,
+            helion.next_power_of_2(num_tokens),
+            default_val=helion.next_power_of_2(num_tokens),
+        ),
     )
+
+    # Fold the top_k combine into GEMM2's store: each weighted routed row
+    # atomically accumulates into its token's output row (the child pre-zeroes
+    # the output), replacing the mm2_out staging cache + moe_sum.
+    fuse_moe_sum = run.tunable("fuse_moe_sum", BooleanFragment())
 
     # The permuted mode routes through the standalone moe_route kernel,
     # called as its registered custom op (torch.ops.vllm_helion.moe_route) so
     # it picks its own pre-tuned config and stays out of the composite's
     # joint config space: one fused launch produces the aligned layout
     # (sorted_token_ids / expert_ids), the expert-major permuted activations
-    # and scales, and inv_perm -- replacing _align_routing + moe_permute.
-    # Both GEMM stages then gather through inv_perm (GEMM1 also stores
-    # permuted, keeping the intermediate contiguous per expert, while GEMM2
-    # scatters its weighted output to the routed slots' token-order rows, so
-    # the combine is always a contiguous moe_sum). The unpermuted mode keeps
-    # _align_routing's layout: moe_align_block_size wins the alignment-only
-    # case, and at small num_tokens it skips alignment entirely (Triton
-    # fused_moe's naive_block_assignment heuristic).
+    # and scales, inv_perm, and the padded routed-slot count -- replacing
+    # _align_routing + moe_permute. Both GEMM stages then gather through
+    # inv_perm (GEMM1 also stores permuted, keeping the intermediate
+    # contiguous per expert, while GEMM2 scatters its weighted output to the
+    # routed slots' token-order rows, so the combine is always a contiguous
+    # moe_sum). The unpermuted mode keeps _align_routing's layout:
+    # moe_align_block_size wins the alignment-only case, degenerating to the
+    # dense layout (no align kernel) at align_block_size == 1. Either way the
+    # count flows to both GEMMs as a device tensor -- their grids stay at the
+    # worst-case bound and prune the tail in-kernel, so nothing reads back to
+    # the host.
     aq = hidden_states
     aq_scale = a1q_scale
     inv_perm = None
-    if permuted:
+    if not unpermuted:
         max_padded, num_blocks = _align_sizes(
             num_tokens, top_k, global_num_experts, align_block_size
         )
@@ -858,6 +958,7 @@ def mega_moe_block_mm(
             (routed, a1q_scale.shape[1]), dtype=a1q_scale.dtype, device=device
         )
         inv_perm = torch.empty(routed, dtype=torch.int32, device=device)
+        num_tokens_post_pad = torch.empty(1, dtype=torch.int32, device=device)
         torch.ops.vllm_helion.moe_route(
             topk_ids,
             expert_map,
@@ -872,12 +973,11 @@ def mega_moe_block_mm(
             permuted_aq,
             permuted_scale,
             inv_perm,
+            num_tokens_post_pad,
         )
         aq, aq_scale = permuted_aq, permuted_scale
-    elif expert_map is None and num_tokens * top_k * 4 <= global_num_experts:
-        sorted_token_ids, expert_ids = None, topk_ids.view(-1)
     else:
-        sorted_token_ids, expert_ids = _align_routing(
+        sorted_token_ids, expert_ids, num_tokens_post_pad = _align_routing(
             topk_ids, expert_map, global_num_experts, align_block_size
         )
 
@@ -897,8 +997,10 @@ def mega_moe_block_mm(
         num_tokens,
         top_k,
         align_block_size,
+        num_tokens_post_pad,
         None,
         inv_perm,
+        False,  # fuse_moe_sum: the gate_up projection never combines
     )
 
     # silu_and_mul + per-block fp8 quant at the full routed M.
@@ -906,15 +1008,20 @@ def mega_moe_block_mm(
         gate_up, group_size=128, quant_dtype=torch.float8_e4m3fn
     )
 
-    # GEMM2: down projection over the per-routed-row quantized intermediate,
-    # staged in workspace13 (TritonExperts' intermediate_cache3 role). Each row
-    # is scaled by its routed weight in the epilogue (Triton's
-    # mul_routed_weight); in the permuted mode the store scatters to the routed
-    # slots' token-order rows.
-    mm2_out = _resize_cache(workspace13, (num_tokens, top_k, H)).view(routed, H)
+    # GEMM2: down projection over the per-routed-row quantized intermediate.
+    # Each row is scaled by its routed weight in the epilogue (Triton's
+    # mul_routed_weight). Unfused, the weighted rows are staged in workspace13
+    # (TritonExperts' intermediate_cache3 role) and reduced over top_k by
+    # moe_sum; fused (fuse_moe_sum), GEMM2 stores straight into the layer
+    # output, accumulating each token's top_k contributions atomically.
+    mm2_out = (
+        None
+        if fuse_moe_sum
+        else _resize_cache(workspace13, (num_tokens, top_k, H)).view(routed, H)
+    )
     run(
         moe_block_mm,
-        mm2_out,
+        output if fuse_moe_sum else mm2_out,
         hq,
         hq_scale,
         w2,
@@ -924,11 +1031,14 @@ def mega_moe_block_mm(
         num_tokens,
         top_k,
         align_block_size,
+        num_tokens_post_pad,
         topk_weights,
         inv_perm,
+        fuse_moe_sum,
     )
 
     # Combine: reduce the weighted routed rows over top_k into the layer
     # output. GEMM2 writes token-order rows in both modes, so this is always
-    # a contiguous moe_sum.
-    ops.moe_sum(mm2_out.view(num_tokens, top_k, H), output)
+    # a contiguous moe_sum; the fused combine skipped it above.
+    if not fuse_moe_sum:
+        ops.moe_sum(mm2_out.view(num_tokens, top_k, H), output)
