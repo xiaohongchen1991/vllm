@@ -28,15 +28,20 @@ buffer value is computed by exactly one program, so the maps are correct
 either way.
 
 Interface notes: ``sorted_token_ids`` / ``expert_ids`` are caller-allocated
-with the worst-case ``_align_sizes`` shapes (static per specialization); the
+with the worst-case ``_align_sizes`` shapes (static per specialization);
+``num_tokens_post_padded`` (optional, [1] int32) receives the actual padded
+routed-slot count (total blocks x m_block_size) so consumers can prune their
+worst-case grids in-kernel without a D2H sync; the
 census scratch (counts / ranks / row offsets / block offsets) is allocated
 inside the kernel and never escapes it. Off-rank slots (expert_map -> -1)
 never write: their blocks do not exist (the expert_ids -1 tail covers them)
 and their stores are masked.
 
 The tuned cases are permuted-only (the mega's sole use of this kernel) at
-``m_block_size = num_tokens`` -- the runtime ``m_block_size`` pads the layout
-but is not a tuning dimension -- and mirror the mega's per-model (E, EP, K)
+``m_block_size = next_power_of_two(num_tokens)`` -- the kernel requires a
+power-of-two block size (its pass-1 lane arange), and the runtime
+``m_block_size`` pads the layout but is not a tuning dimension -- and mirror
+the mega's per-model (E, EP, K)
 deployments with a linear rank-0 ``expert_map`` under EP.
 """
 
@@ -97,8 +102,9 @@ def _generate_input(
     num_local_experts = E // ep_size
 
     # The mega's permuted branch is the only caller, and its tuning pairs
-    # align_block_size with num_tokens: keep that pairing here.
-    m_block_size = num_tokens
+    # align_block_size with num_tokens: keep that pairing here, rounded up to
+    # a power of two (the kernel's pass-1 lane arange requires it).
+    m_block_size = helion.next_power_of_2(num_tokens)
 
     scale_dtype = torch.float32
     routed = num_tokens * top_k
@@ -117,6 +123,7 @@ def _generate_input(
     permuted_aq = torch.empty(routed, K, dtype=fp8, device="cuda")
     permuted_scale = torch.empty(routed, num_group_k, dtype=scale_dtype, device="cuda")
     inv_perm = torch.empty(routed, dtype=torch.int32, device="cuda")
+    num_tokens_post_padded = torch.empty(1, dtype=torch.int32, device="cuda")
 
     # A TP+EP rank's view (linear placement, this rank first): on-rank experts
     # reindexed from 0, off-rank -1, as the mega's permuted branch passes it.
@@ -142,6 +149,7 @@ def _generate_input(
         permuted_aq,
         permuted_scale,
         inv_perm,
+        num_tokens_post_padded,
     )
 
 
@@ -160,7 +168,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         (128, 8, 4, 4096),  # Qwen3-235B-A22B
         (256, 8, 8, 6144),  # GLM-5.3
     ]
-    num_tokens_list = [1, 8, 32]
+    num_tokens_list = [4, 8, 16, 32, 64]
 
     inputs = {}
     for num_tokens, (E, top_k, ep_size, K) in product(
@@ -188,7 +196,8 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     """Pick the best pre-tuned config: exact (E, K, top_k, permuted)
     preferred, num_tokens bucketed to the smallest tuned value >= runtime.
     m_block_size is not matched -- cases are tuned at m_block_size =
-    num_tokens, and the runtime value only pads the layout."""
+    next_power_of_two(num_tokens), and the runtime value only pads the
+    layout."""
 
     if not config_keys:
         return None
@@ -247,6 +256,7 @@ def fake_impl(
     permuted_aq: torch.Tensor | None = None,
     permuted_scale: torch.Tensor | None = None,
     inv_perm: torch.Tensor | None = None,
+    num_tokens_post_padded: torch.Tensor | None = None,
 ) -> None:
     return
 
@@ -265,6 +275,7 @@ def baseline(
     permuted_aq: torch.Tensor | None = None,
     permuted_scale: torch.Tensor | None = None,
     inv_perm: torch.Tensor | None = None,
+    num_tokens_post_padded: torch.Tensor | None = None,
 ) -> None:
     """Eager torch reference (the mega's routing without torch.compile): a
     stable argsort gives the expert-major slot order; searchsorted over the
@@ -291,6 +302,10 @@ def baseline(
     counts = (boundaries[1:] - boundaries[:-1]).to(torch.int32)
     blocks_per_expert = (counts.to(torch.int64) + (m_block_size - 1)) // m_block_size
     block_offs = torch.cumsum(blocks_per_expert, 0) - blocks_per_expert
+    if num_tokens_post_padded is not None:
+        num_tokens_post_padded.copy_(
+            (blocks_per_expert.sum() * m_block_size).to(torch.int32).reshape(1)
+        )
 
     # Aligned layout: padding marker / -1 tail, then the real blocks/slots.
     sorted_token_ids.fill_(routed)
@@ -333,7 +348,10 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
     a, ref = list(actual), list(expected)
     # sorted(2) expert_ids(3) num_tokens(4) top_k(5) m_block_size(6) E(7)
     # src_aq(8) src_scale(9) permuted_aq(10) permuted_scale(11) inv_perm(12)
+    # ntp(13)
     assert torch.equal(a[3], ref[3])
+    if a[13] is not None:
+        assert torch.equal(a[13], ref[13])
 
     topk_ids = a[0]
     num_tokens, top_k = topk_ids.shape
@@ -383,6 +401,7 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
         "permuted_aq",
         "permuted_scale",
         "inv_perm",
+        "num_tokens_post_padded",
     ],
     config_picker=pick_config,
     input_generator=generate_inputs,
@@ -412,6 +431,8 @@ def moe_route(
     permuted_aq: torch.Tensor | None = None,  # [routed, K] (out)
     permuted_scale: torch.Tensor | None = None,  # [routed, K // 128] (out)
     inv_perm: torch.Tensor | None = None,  # [routed] int32 (out)
+    num_tokens_post_padded: torch.Tensor
+    | None = None,  # [1] int32 (out: padded routed-slot count)
 ) -> None:
     routed = num_tokens * top_k
 
@@ -424,6 +445,9 @@ def moe_route(
     assert topk_flat.numel() == routed
     assert topk_ids.dtype == torch.int32
     assert expert_ids.dtype == torch.int32
+    # Pass 1's lane count (tile block size x m_block_size) feeds tl.arange,
+    # which requires a power-of-two length -- so the block size must be one.
+    assert m_block_size > 0 and (m_block_size & (m_block_size - 1)) == 0
 
     # Census scratch, allocated fresh per launch: counts / ranks are zeroed
     # by pass 0, and pass 2 fully writes the offsets.
@@ -500,6 +524,20 @@ def moe_route(
         block_offs_buf[tile_e] = torch.where(
             e_all[None, :] < e_idx[:, None], blocks_per_expert[None, :], 0
         ).sum(dim=1)
+
+        # The actual padded routed-slot count (total blocks x block size) so
+        # downstream consumers can prune their worst-case grids in-kernel.
+        # Every program reads the full census (same value), so only the first
+        # computes and stores it -- a single writer, no redundant reductions.
+        # Only real blocks exist, so the count is a multiple of m_block_size
+        # by construction.
+        if num_tokens_post_padded is not None and tile_e.begin == 0:
+            total_blocks = blocks_per_expert[None, :].sum(dim=1)
+            hl.store(
+                num_tokens_post_padded,
+                [hl.arange(1)],
+                total_blocks * m_block_size,
+            )
 
     # Pass 3: place every slot -- gather its expert's block offset, claim a
     # per-expert rank with one atomic, and scatter. The slot block is fixed
