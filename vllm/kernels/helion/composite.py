@@ -50,9 +50,34 @@ from helion.autotuner.config_fragment import ConfigSpecFragment
 from helion.autotuner.config_generation import ConfigGeneration
 from helion.autotuner.effort_profile import get_effort_profile
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 # Args of these positions are mutated by the body and get per-candidate clones
 # in accuracy checks (mirrors helion's mutates_args semantics).
 JointConfig = Mapping[str, Any]
+
+# Codegen-shape tunables: knobs that multiply the number of distinct compiled
+# kernels without changing the algorithm. Stage 1 pins them, stage 2 frees them
+# all and tunes them against the block sizes, warps, stages and split-K chosen
+# by stage 1. ``None`` pins a key to each site's ConfigSpec default; a literal
+# is used as-is, broadcast to that site's arity when the default is a list.
+_STAGE_PINS: dict[str, Any] = {
+    # Plain pointer indexing / no eviction hints: descriptor codegen compiles
+    # far more slowly and was never the winning choice across shapes.
+    "indexing": "pointer",
+    "load_eviction_policies": "",
+    "range_unroll_factors": None,
+    "range_num_stages": None,
+    "range_multi_buffers": None,
+    "range_flattens": None,
+    "range_warp_specializes": None,
+    "atomic_indexing": None,
+    "host_tensor_descriptors": None,
+}
+# Everything stage 2 is allowed to vary.
+_STAGE_TWO_FREE_KEYS = tuple(_STAGE_PINS)
 
 
 def is_composite_body(body: Callable) -> bool:
@@ -362,7 +387,50 @@ class CompositeConfigGeneration(ConfigGeneration):
     fixed boundaries, delegating per site to the child generation, so fragment
     behavior (pattern neighbors, encoding, viability) is inherited from the
     children rather than reimplemented.
+
+    Overrides are addressed by flat-layout name: ``root.<name>`` pins a root
+    tunable and ``children.<site>.<key>`` pins a child tunable. Child overrides
+    layer on top of that child kernel's own ``autotune_config_overrides``
+    settings, so an unaddressed site keeps its kernel-level pins (e.g.
+    ``indexing``); the composite uses the explicit form to run a second
+    autotune stage with everything but the structure lists frozen.
     """
+
+    def _site_overrides(self, site: _Site) -> dict[str, Any] | None:
+        """The site's config overrides, adapted to this site's ConfigSpec.
+
+        Combines the child kernel's own ``autotune_config_overrides`` with any
+        addressed to this site (``children.<site>.<key>``). A kernel-level
+        override applies to every call site of that kernel, but
+        structure-length values (``indexing``, eviction policies) are sized per
+        traced program, so sibling sites can need different lengths. Adapt list
+        values to this site's own spec (truncate, or pad with the spec's
+        defaults) so they encode against that spec's fragments.
+        """
+        prefix = f"children.{site.name}."
+        overrides = dict(site.bound.settings.autotune_config_overrides or {})
+        overrides.update(
+            (key[len(prefix) :], value)
+            for key, value in self._override_values.items()
+            if key.startswith(prefix)
+        )
+        if not overrides:
+            return None
+        default = site.spec.default_config().config
+        adapted: dict[str, Any] = {}
+        for key, value in overrides.items():
+            default_value = default.get(key)
+            if (
+                isinstance(value, list)
+                and isinstance(default_value, list)
+                and len(value) != len(default_value)
+            ):
+                if len(value) < len(default_value):
+                    value = [*value, *default_value[len(value) :]]
+                else:
+                    value = value[: len(default_value)]
+            adapted[key] = value
+        return adapted
 
     def __init__(
         self,
@@ -377,8 +445,17 @@ class CompositeConfigGeneration(ConfigGeneration):
         self.config_spec = config_spec
         self._root: dict[str, ConfigSpecFragment] = dict(config_spec._root)
         self._sites: list[_Site] = list(config_spec._sites)
+        self._override_values: dict[str, Any] = dict(overrides or {})
+        self._root_override_values: dict[str, Any] = {
+            key[len("root.") :]: value
+            for key, value in self._override_values.items()
+            if key.startswith("root.")
+        }
         self._child_gens = [
-            site.spec.create_config_generation() for site in self._sites
+            site.spec.create_config_generation(
+                overrides=self._site_overrides(site),
+            )
+            for site in self._sites
         ]
         self._root_names = list(self._root)
 
@@ -421,7 +498,6 @@ class CompositeConfigGeneration(ConfigGeneration):
         self.invalid_config_count = 0
         self.process_group_name = None
         self._advanced_controls_files = None
-        self._override_values = dict(overrides or {})
         self._initial_sampling = False
         self.compiler_coverage_enabled = False
         self._field_view = None
@@ -441,7 +517,8 @@ class CompositeConfigGeneration(ConfigGeneration):
 
     def flatten(self, config: Any) -> list[Any]:
         joint = _joint_dict(config)
-        root_values = joint.get("root", {})
+        root_values = dict(joint.get("root", {}))
+        root_values.update(self._root_override_values)
         sections = joint.get("children", {})
         flat = [
             root_values.get(name, frag.default())
@@ -467,6 +544,7 @@ class CompositeConfigGeneration(ConfigGeneration):
             )
         n_root = len(self._root_names)
         root = {name: flat_values[i] for i, name in enumerate(self._root_names)}
+        root.update(self._root_override_values)
         children: dict[str, Any] = {}
         pos = n_root
         for site, gen in zip(self._sites, self._child_gens, strict=True):
@@ -650,30 +728,116 @@ class CompositeKernel:
         runner.__signature__ = body_signature(self.body)  # type: ignore[attr-defined]
         return runner
 
-    def autotune(
+    def _autotune_stage(
         self,
+        bound: BoundCompositeKernel,
         args: tuple[Any, ...],
-        *,
-        autotune_effort: str = "quick",
-    ) -> helion.Config:
-        """Search the joint (root + per-site) space with helion's LFBOTreeSearch.
-
-        Every candidate is a complete joint config measured by running the
-        whole body, so inter-kernel effects are inside the measurement.
-        """
+        effort: str,
+        overrides: Mapping[str, Any] | None,
+        seed: helion.Config | None = None,
+    ) -> tuple[helion.Config, float]:
+        """One LFBOTreeSearch over the composite with a fixed override set."""
         settings = dataclasses.replace(
             self.settings,
-            autotune_effort=autotune_effort,
+            autotune_effort=effort,
             autotune_ignore_errors=True,
             # Subprocess precompilation wraps a single kernel's compiled
             # callable (format_kernel_decorator); the composite compiles its
             # children in process via compile_config, so keep it local.
             autotune_precompile=False,
+            autotune_config_overrides=dict(overrides) if overrides else None,
+            autotune_seed_configs=seed,
         )
-        bound = self.bind(args)
-        bound.settings = settings
+        stage_bound = copy.copy(bound)
+        stage_bound.settings = settings
         kwargs = LFBOTreeSearch.get_kwargs_from_profile(
-            get_effort_profile(autotune_effort), settings
+            get_effort_profile(effort), settings
         )
-        search = LFBOTreeSearch(bound, args, **kwargs)
-        return search.autotune()
+        search = LFBOTreeSearch(stage_bound, args, **kwargs)
+        best = search.autotune()
+        return best, search.best.perf
+
+    @staticmethod
+    def _stage_one_overrides(
+        bound: BoundCompositeKernel,
+    ) -> dict[str, Any]:
+        """Pin every codegen-shape tunable for stage 1, per site.
+
+        Values come from ``_STAGE_PINS``: ``None`` means the site's ConfigSpec
+        default, a literal is used as-is and broadcast to the site's arity when
+        the default is a list. Pinning these keys keeps stage 1's compiled
+        kernel count proportional to the primary dimensions it is exploring.
+        """
+        overrides: dict[str, Any] = {}
+        gen = bound.config_spec.create_config_generation()
+        for site in gen._sites:
+            default = site.spec.default_config().config
+            for key, pinned in _STAGE_PINS.items():
+                if key not in default:
+                    continue
+                default_value = default[key]
+                value = default_value if pinned is None else pinned
+                if isinstance(default_value, list) and not isinstance(value, list):
+                    value = [value] * len(default_value)
+                overrides[f"children.{site.name}.{key}"] = value
+        return overrides
+
+    @staticmethod
+    def _stage_two_overrides(
+        bound: BoundCompositeKernel, best: helion.Config
+    ) -> dict[str, Any]:
+        """Pin everything but the stage-2 free keys at ``best``."""
+        joint = _joint_dict(best)
+        overrides: dict[str, Any] = {
+            f"root.{key}": value for key, value in joint.get("root", {}).items()
+        }
+        sections = joint.get("children", {})
+        gen = bound.config_spec.create_config_generation()
+        for site, child_gen in zip(gen._sites, gen._child_gens, strict=True):
+            section = sections.get(site.name, {})
+            for key in child_gen._key_to_flat_indices:
+                if key in _STAGE_TWO_FREE_KEYS or key not in section:
+                    continue
+                overrides[f"children.{site.name}.{key}"] = section[key]
+        return overrides
+
+    def autotune(
+        self,
+        args: tuple[Any, ...],
+        *,
+        autotune_effort: str = "quick",
+        stage2_effort: str = "quick",
+    ) -> helion.Config:
+        """Two-stage search over the joint (root + per-site) space.
+
+        Every candidate is a complete joint config measured by running the
+        whole body, so inter-kernel effects are inside the measurement.
+
+        Stage 1 tunes the primary dimensions (block sizes, warps, stages,
+        split-K, ...) with the codegen-shape tunables pinned: ``indexing`` and
+        eviction policies at the child kernels' own
+        ``autotune_config_overrides``, and ``_STAGE_ONE_PINNED_KEYS`` at their
+        ConfigSpec defaults. Stage 2 then frees all of those and freezes
+        everything else at stage 1's winner (root included), so the codegen
+        shape is tuned against the chosen primary dimensions. Stage 2 is seeded
+        with the stage-1 winner and re-measures it in the same pass, so the
+        returned config is the better of the two under one measurement regime.
+        """
+        bound = self.bind(args)
+        stage_one = self._stage_one_overrides(bound)
+        best, perf = self._autotune_stage(bound, args, autotune_effort, stage_one)
+        logger.info(
+            "Composite '%s': stage 1 (codegen shape pinned) best %.4fms",
+            self.name,
+            perf,
+        )
+        stage_two = self._stage_two_overrides(bound, best)
+        best, perf = self._autotune_stage(
+            bound, args, stage2_effort, stage_two, seed=best
+        )
+        logger.info(
+            "Composite '%s': stage 2 (codegen shape free) best %.4fms",
+            self.name,
+            perf,
+        )
+        return best

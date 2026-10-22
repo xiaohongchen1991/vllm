@@ -11,8 +11,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 1
+        "unpermuted": true,
+        "align_block_size": 1,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -151,8 +152,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 1
+        "unpermuted": true,
+        "align_block_size": 1,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -291,8 +293,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 1
+        "unpermuted": true,
+        "align_block_size": 1,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -429,8 +432,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 1
+        "unpermuted": true,
+        "align_block_size": 1,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -573,8 +577,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 1
+        "unpermuted": true,
+        "align_block_size": 1,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -715,8 +720,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 4
+        "unpermuted": true,
+        "align_block_size": 4,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -859,8 +865,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 8
+        "unpermuted": true,
+        "align_block_size": 8,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1001,8 +1008,9 @@
     },
     "config": {
       "root": {
-        "permuted": true,
-        "align_block_size": 1
+        "unpermuted": false,
+        "align_block_size": 1,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1143,8 +1151,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 2
+        "unpermuted": true,
+        "align_block_size": 2,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1285,8 +1294,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 2
+        "unpermuted": true,
+        "align_block_size": 2,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1429,8 +1439,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 2
+        "unpermuted": true,
+        "align_block_size": 2,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1573,8 +1584,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 4
+        "unpermuted": true,
+        "align_block_size": 4,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1717,8 +1729,9 @@
     },
     "config": {
       "root": {
-        "permuted": false,
-        "align_block_size": 4
+        "unpermuted": true,
+        "align_block_size": 4,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
@@ -1862,8 +1875,9 @@
     },
     "config": {
       "root": {
-        "permuted": true,
-        "align_block_size": 4
+        "unpermuted": false,
+        "align_block_size": 4,
+        "fuse_moe_sum": false
       },
       "children": {
         "moe_block_mm.0": {
