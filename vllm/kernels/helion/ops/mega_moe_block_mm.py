@@ -153,7 +153,9 @@ def _(
 
 # The composite's child GEMM: a plain helion kernel (the composite owns tuning
 # and accuracy). static_shapes=False keeps the align outputs' runtime sizes
-# (max_padded / num_blocks) unspecialized, as in the fused kernel.
+# (max_padded / num_blocks) unspecialized, as in the fused kernel. Codegen-shape
+# tunables are pinned by the composite's stage-1 scheduling (composite.py), not
+# here, so this kernel carries no autotune overrides of its own.
 @helion.kernel(
     static_shapes=False,
     ignore_warnings=[
