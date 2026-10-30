@@ -170,12 +170,12 @@ def _moe_block_mm(
 
 def triton_moe_block_mm(
     output: torch.Tensor,  # [num_tokens, H] bf16 (reduced layer output)
-    hidden_states: torch.Tensor,  # [num_tokens, K] fp8
+    hidden_states: torch.Tensor,  # [num_tokens, K] fp8 (quantized by caller)
     w1: torch.Tensor,  # [E, N, K] fp8 (gate_up, N = 2 * intermediate)
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
     w1_scale: torch.Tensor,  # [E, N // 128, K // 128] f32
     w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128] f32
-    a1q_scale: torch.Tensor,  # [num_tokens, K // 128] f32
+    a1q_scale: torch.Tensor,  # [num_tokens, K // 128] f32 (not None)
     topk_weights: torch.Tensor,  # [num_tokens, top_k] f32
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
     expert_map: torch.Tensor | None,  # [global_num_experts] or None
@@ -185,6 +185,11 @@ def triton_moe_block_mm(
     clamp_limit: float | None = None,  # swiglu_limit of the gated activation
 ) -> None:
     """Triton full-layer baseline for the composite ``mega_moe_block_mm``.
+
+    Requires the fp8 input mode (``fp8_input = True`` in the input generator):
+    the activation arrives already quantized with its per-128-group scales, as
+    the layer hands it to ``TritonExperts`` -- unlike the mega kernel, this
+    baseline does not quantize an unquantized input itself.
 
     Mirrors ``TritonExperts.apply`` end to end: one config and one
     ``_prepare_expert_assignment`` feed both GEMMs; GEMM1 writes the bf16
@@ -213,10 +218,10 @@ def triton_moe_block_mm(
     routed = num_tokens * top_k
     H = w2.shape[1]
 
-    if hidden_states.dtype != torch.float8_e4m3fn:
+    if hidden_states.dtype != torch.float8_e4m3fn or a1q_scale is None:
         raise NotImplementedError(
-            "The Triton fused_moe block-scaled baseline only supports fp8 "
-            f"activations, got {hidden_states.dtype}."
+            "The Triton fused_moe block-scaled baseline requires the fp8 input "
+            f"mode (fp8_input = True), got {hidden_states.dtype} activations."
         )
 
     # moe_block_mm quantizes with 128x128 weight blocks and 1x128 act groups.
@@ -441,12 +446,12 @@ def _fi_ep_params(
 
 def flashinfer_moe_block_mm(
     output: torch.Tensor,  # [num_tokens, H] bf16 (reduced layer output)
-    hidden_states: torch.Tensor,  # [num_tokens, K] fp8 (already quantized)
+    hidden_states: torch.Tensor,  # [num_tokens, K] bf16 (unquantized)
     w1: torch.Tensor,  # [E, N, K] fp8 (gate_up, N = 2 * intermediate)
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
     w1_scale: torch.Tensor,  # [E, N // 128, K // 128] f32
     w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128] f32
-    a1q_scale: torch.Tensor,  # [num_tokens, K // 128] f32
+    a1q_scale: torch.Tensor | None,  # unused: the kernel quantizes the input
     topk_weights: torch.Tensor,  # [num_tokens, top_k] f32
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
     expert_map: torch.Tensor | None,  # [global_num_experts] or None
@@ -459,13 +464,14 @@ def flashinfer_moe_block_mm(
 
     Mirrors ``FlashInferExperts.apply``'s ``use_deepseek_fp8_block_scale``
     branch -- ``quant_scales=[w1_scale, w2_scale]``, fp8 block-scaled weights,
-    ``swiglu_limit`` for the clamp -- with one deliberate difference: vLLM
-    passes unquantized activations (``input_sf=None``,
-    ``expects_unquantized_inputs``) and lets the kernel quantize them itself,
-    while this baseline passes the already-quantized fp8 activations plus their
-    per-128-group scales through ``input_sf``, i.e. the same input the mega
-    kernel receives. The W31 layout swap vLLM performs at load time is done on
-    the first call (warmup) and cached.
+    ``swiglu_limit`` for the clamp, and unquantized activations
+    (``expects_unquantized_inputs``): flashinfer builds the fp8 x fp8 runner
+    only when the block-scale flag is off, and its block-scale runner is a
+    bf16 x fp8 kernel that derives the per-128 activation scales itself. So this
+    baseline takes the case's bf16 activations as-is (``fp8_input = False`` in
+    the input generator) and passes no ``input_sf``; given fp8 activations it
+    would fail to construct the runner. The W31 layout swap vLLM performs at
+    load time is done on the first call (warmup) and cached.
 
     SM90 only: FlashInfer implements FP8 block scaling for Hopper ("FP8 block
     scaling not yet implemented for Blackwell"). Expert parallelism follows the
@@ -499,8 +505,9 @@ def flashinfer_moe_block_mm(
     state = _fi_state(
         w1, w2, w1_scale, w2_scale, expert_map, global_num_experts, clamp_limit
     )
-    # Per-call work, as in FlashInferExperts.apply: adapt the routing dtype and
-    # hand the kernel the activation blocks the mega kernel already consumed.
+    # Per-call work, as in FlashInferExperts.apply: hand over the unquantized
+    # activations (no input_sf, no activation blocks) and adapt the routing
+    # dtype.
     _ = flashinfer_cutlass_fused_moe(
         input=hidden_states,
         token_selected_experts=topk_ids.to(torch.int),
@@ -515,7 +522,7 @@ def flashinfer_moe_block_mm(
         output=output,
         output_dtype=output.dtype,
         quant_scales=[state.w13_scale, state.fc2_scale],
-        input_sf=a1q_scale if a1q_scale.is_contiguous() else a1q_scale.contiguous(),
+        input_sf=None,
         tp_size=1,
         tp_rank=0,
         ep_size=state.ep_size,
