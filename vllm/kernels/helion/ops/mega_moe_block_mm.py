@@ -705,6 +705,7 @@ def _generate_input(
     clamp_limit: float | None = None,
     routing_seed: int = 0,
     fixed_seed: bool = True,
+    fp8_input: bool = True,
 ) -> tuple[Any, ...]:
     assert E % ep_size == 0
     num_local_experts = E // ep_size
@@ -732,7 +733,11 @@ def _generate_input(
     )
 
     scale2 = 1.0 / math.sqrt(intermediate)
-    hidden_states = (scale * (0.5 + torch.rand(num_tokens, K, device="cuda"))).to(fp8)
+    # fp8_input=False leaves the activation unquantized (bf16): the kernel then
+    # quantizes it internally and a1q_scale is None.
+    hidden_states = (scale * (0.5 + torch.rand(num_tokens, K, device="cuda"))).to(
+        fp8 if fp8_input else out_dtype
+    )
     w1 = (scale * (0.5 + torch.rand(num_local_experts, N, K, device="cuda"))).to(fp8)
     w2 = (
         scale2 * (0.5 + torch.rand(num_local_experts, H, intermediate, device="cuda"))
@@ -740,10 +745,12 @@ def _generate_input(
     # Layer-level output: the top_k-weighted rows reduced over top_k.
     output = torch.zeros((num_tokens, H), dtype=out_dtype, device="cuda")
 
-    a1q_scale = 0.5 + torch.rand(
-        num_group_k, num_tokens, dtype=scale_dtype, device="cuda"
-    )
-    a1q_scale = _ceil_to_ue8m0(a1q_scale).t()
+    a1q_scale = None
+    if fp8_input:
+        a1q_scale = 0.5 + torch.rand(
+            num_group_k, num_tokens, dtype=scale_dtype, device="cuda"
+        )
+        a1q_scale = _ceil_to_ue8m0(a1q_scale).t()
 
     # Weight scales: w1 [E, num_group_n, num_group_k], w2 [E, num_group_h,
     # num_group_i].
@@ -805,6 +812,12 @@ def generate_inputs() -> dict[CaseKey, CaseInputs]:
     # config is not fitted to one sample.
     fixed_seed = True
 
+    # Hardcoded switch: fp8 activations are the production input (the layer
+    # quantizes before the MoE). Set it to False to hand the kernel bf16
+    # activations instead, which it quantizes internally -- the shape
+    # FlashInfer's block-scale kernel expects, so it can be compared directly.
+    fp8_input = True
+
     # The Helion kernel is autotuned per shape.
     # num_tokens_list follows the cudagraph_capture_sizes pattern but is capped
     # here to cover only small values.
@@ -855,6 +868,7 @@ def generate_inputs() -> dict[CaseKey, CaseInputs]:
             ep_size,
             clamp_limit,
             fixed_seed=fixed_seed,
+            fp8_input=fp8_input,
         )
         n_routing = 4
         arg_sets = [base]
@@ -903,6 +917,10 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     num_local_experts, N = w1.shape[0], w1.shape[1]
     ep_size = global_num_experts // num_local_experts
     in_dtype = str(hidden_states.dtype)
+    if hidden_states.dtype != current_platform.fp8_dtype():
+        # A non-fp8 input is quantized inside the kernel, so the compiled stages
+        # are the fp8 ones: match their configs.
+        in_dtype = str(current_platform.fp8_dtype())
 
     cache_key = (global_num_experts, ep_size, K, N, top_k, num_tokens, in_dtype)
     if cache_key in _pick_cache:
@@ -949,7 +967,7 @@ def fake_impl(
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
     w1_scale: torch.Tensor,  # [E, N // 128, K // 128]
     w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128]
-    a1q_scale: torch.Tensor,  # [num_tokens, K // 128]
+    a1q_scale: torch.Tensor | None,  # [num_tokens, K // 128]; None if not fp8
     topk_weights: torch.Tensor,  # [num_tokens, top_k] routed combine weights
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
     expert_map: torch.Tensor | None,  # [global_num_experts] or None
@@ -995,7 +1013,7 @@ def baseline(
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
     w1_scale: torch.Tensor,  # [E, N // 128, K // 128]
     w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128]
-    a1q_scale: torch.Tensor,  # [num_tokens, K // 128]
+    a1q_scale: torch.Tensor | None,  # [num_tokens, K // 128]; None if not fp8
     topk_weights: torch.Tensor,  # [num_tokens, top_k] routed combine weights
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
     expert_map: torch.Tensor | None,  # [global_num_experts] or None
@@ -1015,6 +1033,18 @@ def baseline(
     N = w1.shape[1]
     H = w2.shape[1]
     routed = num_tokens * top_k
+
+    if a1q_scale is None:
+        # Non-fp8 input: quantize with the same block quantizer the kernel uses,
+        # so the reference models the kernel's arithmetic instead of carrying
+        # independent fp8 rounding.
+        hidden_states, a1q_scale = moe_kernel_quantize_input(
+            hidden_states,
+            None,
+            current_platform.fp8_dtype(),
+            False,
+            [GROUP_K, GROUP_K],
+        )
 
     # GEMM1 reference: bf16 gate_up in routed-row order. The reference aligns
     # at its own block size; the layer output is invariant to the layout.
@@ -1129,7 +1159,7 @@ def mega_moe_block_mm(
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
     w1_scale: torch.Tensor,  # [E, N // 128, K // 128]
     w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128]
-    a1q_scale: torch.Tensor,  # [num_tokens, K // 128]
+    a1q_scale: torch.Tensor | None,  # [num_tokens, K // 128]; None if not fp8
     topk_weights: torch.Tensor,  # [num_tokens, top_k]
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
     expert_map: torch.Tensor | None,
@@ -1196,8 +1226,24 @@ def mega_moe_block_mm(
     # count flows to both GEMMs as a device tensor -- their grids stay at the
     # worst-case bound and prune the tail in-kernel, so nothing reads back to
     # the host.
-    aq = hidden_states
-    aq_scale = a1q_scale
+
+    # Internal quantization: a non-fp8 activation is quantized here, one dynamic
+    # scale per 128-column group, exactly as the Triton block-quant path does
+    # ahead of its GEMMs -- so the routing child and both GEMM sites always see
+    # fp8 plus scales, and a caller may hand over the layer's bf16 input (the
+    # shape FlashInfer's block-scale kernel takes).
+    if hidden_states.dtype == current_platform.fp8_dtype():
+        assert a1q_scale is not None
+        aq, aq_scale = hidden_states, a1q_scale
+    else:
+        assert a1q_scale is None
+        aq, aq_scale = moe_kernel_quantize_input(
+            hidden_states,
+            None,
+            current_platform.fp8_dtype(),
+            False,
+            [GROUP_K, GROUP_K],
+        )
     inv_perm = None
     if not unpermuted:
         max_padded, num_blocks = _align_sizes(
@@ -1206,11 +1252,9 @@ def mega_moe_block_mm(
         device = hidden_states.device
         sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
         expert_ids = torch.empty(num_blocks, dtype=torch.int32, device=device)
-        permuted_aq = torch.empty(
-            (routed, hidden_states.shape[1]), dtype=hidden_states.dtype, device=device
-        )
+        permuted_aq = torch.empty((routed, aq.shape[1]), dtype=aq.dtype, device=device)
         permuted_scale = torch.empty(
-            (routed, a1q_scale.shape[1]), dtype=a1q_scale.dtype, device=device
+            (routed, aq_scale.shape[1]), dtype=aq_scale.dtype, device=device
         )
         inv_perm = torch.empty(routed, dtype=torch.int32, device=device)
         num_tokens_post_pad = torch.empty(1, dtype=torch.int32, device=device)
@@ -1223,8 +1267,8 @@ def mega_moe_block_mm(
             top_k,
             align_block_size,
             global_num_experts,
-            hidden_states,
-            a1q_scale,
+            aq,
+            aq_scale,
             permuted_aq,
             permuted_scale,
             inv_perm,
