@@ -61,6 +61,7 @@ from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
 from vllm.kernels.helion.composite import CompositeKernel
+from vllm.kernels.helion.inputs import CaseInputs, normalize_arg_sets
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
 # vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
@@ -294,7 +295,7 @@ class HelionKernelWrapper:
         config_picker: ConfigPicker,
         mutates_args: list[str] | None = None,
         helion_settings: helion.Settings | None = None,
-        input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
+        input_generator: (Callable[[], dict[CaseKey, CaseInputs]] | None) = None,
         use_variant_config: bool = False,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
@@ -346,7 +347,7 @@ class HelionKernelWrapper:
         # During eager execution, call the kernel directly.
         return self._configured_kernel(*args, **kwargs)
 
-    def get_inputs(self) -> dict[CaseKey, tuple[Any, ...]]:
+    def get_inputs(self) -> dict[CaseKey, CaseInputs]:
         if self._input_generator is None:
             raise NotImplementedError(
                 f"No input generator registered for kernel '{self.op_name}'. "
@@ -356,11 +357,18 @@ class HelionKernelWrapper:
 
     def run_autotune(
         self,
-        inputs: tuple[Any, ...],
+        inputs: CaseInputs,
         autotune_effort: str = "quick",
     ) -> Config:
-        """Run autotuning for a single input configuration."""
+        """Run autotuning for one case's inputs.
+
+        A case carries either one argument tuple or several (multi-input): the
+        latter tunes a single config across all of them, so the winner is
+        robust to the per-input variation rather than fitted to one draw.
+        """
         from vllm.kernels.helion.composite import is_composite_body
+
+        arg_sets = normalize_arg_sets(inputs)
 
         if is_composite_body(self.raw_kernel_func):
             # Composite kernel: search the joint (root tunables + per-call-site
@@ -369,7 +377,7 @@ class HelionKernelWrapper:
             composite = CompositeKernel(
                 self.raw_kernel_func, settings=self.helion_settings
             )
-            return composite.autotune(inputs, autotune_effort=autotune_effort)
+            return composite.autotune(arg_sets, autotune_effort=autotune_effort)
 
         extra_kwargs = {
             "autotune_effort": autotune_effort,
@@ -378,7 +386,12 @@ class HelionKernelWrapper:
         autotune_kernel = create_helion_decorated_kernel(
             self.raw_kernel_func, self.helion_settings, extra_kwargs
         )
-        return autotune_kernel.autotune(inputs)
+        if len(arg_sets) == 1:
+            return autotune_kernel.autotune(arg_sets[0])
+        # Multi-input: helion's joint search needs a caller-owned cache tag
+        # because vLLM runs with static_shapes=False and installs baseline /
+        # accuracy callbacks (see Kernel.autotune_multi).
+        return autotune_kernel.autotune_multi(arg_sets, cache_tag=self.op_name)
 
     def get_configured_op(self) -> ConfiguredHelionKernel:
         if self._disabled:

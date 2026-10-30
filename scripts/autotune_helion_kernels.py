@@ -37,6 +37,7 @@ try:
         get_kernel_by_name,
         get_registered_kernels,
     )
+    from vllm.kernels.helion.inputs import normalize_arg_sets
     from vllm.kernels.helion.ops import import_all_kernels
     from vllm.kernels.helion.utils import (
         get_config_gpu_name,
@@ -178,9 +179,14 @@ def autotune_kernel(
 
         for config_key, inputs in configs_to_autotune.items():
             logger.info("Autotuning config: %s", config_key)
+            arg_sets = normalize_arg_sets(inputs)
             logger.debug(
-                "Input shapes: %s",
-                [getattr(inp, "shape", type(inp).__name__) for inp in inputs],
+                "Input shapes (%d input(s)): %s",
+                len(arg_sets),
+                [
+                    [getattr(inp, "shape", type(inp).__name__) for inp in arg_set]
+                    for arg_set in arg_sets
+                ],
             )
 
             try:

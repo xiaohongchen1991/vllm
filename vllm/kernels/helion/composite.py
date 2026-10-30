@@ -46,10 +46,12 @@ from typing import Any
 import helion
 import torch
 from helion.autotuner import LFBOTreeSearch
+from helion.autotuner.benchmark_provider import _MultiShapeAutotuneArgs
 from helion.autotuner.config_fragment import ConfigSpecFragment
 from helion.autotuner.config_generation import ConfigGeneration
 from helion.autotuner.effort_profile import get_effort_profile
 
+from vllm.kernels.helion.inputs import CaseInputs, normalize_arg_sets
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -728,10 +730,32 @@ class CompositeKernel:
         runner.__signature__ = body_signature(self.body)  # type: ignore[attr-defined]
         return runner
 
+    def _multi_input_args(
+        self,
+        arg_sets: Sequence[tuple[Any, ...]],
+        bounds: Sequence[BoundCompositeKernel],
+    ) -> Any:
+        """The search's args: one tuple, or helion's multi-input carrier.
+
+        The carrier makes helion compose one benchmark provider per input and
+        reduce their timings (geometric mean), so a candidate is scored on all
+        of them. Inputs are expected to share shapes, i.e. one compiled kernel
+        per candidate serves every case.
+        """
+        if len(arg_sets) == 1:
+            return arg_sets[0]
+        return _MultiShapeAutotuneArgs(
+            cases=tuple(zip(bounds, arg_sets, strict=True)),
+            aggregation="geomean",
+            relative_to=None,
+            cache_tag=None,
+            workload_key=("composite", "geomean", len(arg_sets)),
+        )
+
     def _autotune_stage(
         self,
-        bound: BoundCompositeKernel,
-        args: tuple[Any, ...],
+        bounds: Sequence[BoundCompositeKernel],
+        arg_sets: Sequence[tuple[Any, ...]],
         effort: str,
         overrides: Mapping[str, Any] | None,
         seed: helion.Config | None = None,
@@ -748,8 +772,17 @@ class CompositeKernel:
             autotune_config_overrides=dict(overrides) if overrides else None,
             autotune_seed_configs=seed,
         )
-        stage_bound = copy.copy(bound)
-        stage_bound.settings = settings
+        # Every case carries these settings: helion's multi-input provider
+        # benchmarks each case through its own bound kernel (and would
+        # otherwise re-enable subprocess precompilation, which the composite's
+        # runner cannot serve).
+        stage_bounds = []
+        for case_bound in bounds:
+            staged = copy.copy(case_bound)
+            staged.settings = settings
+            stage_bounds.append(staged)
+        stage_bound = stage_bounds[0]
+        args = self._multi_input_args(arg_sets, stage_bounds)
         kwargs = LFBOTreeSearch.get_kwargs_from_profile(
             get_effort_profile(effort), settings
         )
@@ -803,7 +836,7 @@ class CompositeKernel:
 
     def autotune(
         self,
-        args: tuple[Any, ...],
+        args: CaseInputs,
         *,
         autotune_effort: str = "quick",
         stage2_effort: str = "quick",
@@ -811,7 +844,9 @@ class CompositeKernel:
         """Two-stage search over the joint (root + per-site) space.
 
         Every candidate is a complete joint config measured by running the
-        whole body, so inter-kernel effects are inside the measurement.
+        whole body, so inter-kernel effects are inside the measurement. A case
+        may carry several arg sets (multi-input); each candidate is then
+        measured on all of them and scored by the geometric mean.
 
         Stage 1 tunes the primary dimensions (block sizes, warps, stages,
         split-K, ...) with the codegen-shape tunables pinned: ``indexing`` and
@@ -823,9 +858,13 @@ class CompositeKernel:
         with the stage-1 winner and re-measures it in the same pass, so the
         returned config is the better of the two under one measurement regime.
         """
-        bound = self.bind(args)
+        arg_sets = normalize_arg_sets(args)
+        bounds = [self.bind(arg_set) for arg_set in arg_sets]
+        # The first input is the anchor: it owns the config spec the search
+        # explores (same-shape inputs share it) and the stage overrides.
+        bound = bounds[0]
         stage_one = self._stage_one_overrides(bound)
-        best, perf = self._autotune_stage(bound, args, autotune_effort, stage_one)
+        best, perf = self._autotune_stage(bounds, arg_sets, autotune_effort, stage_one)
         logger.info(
             "Composite '%s': stage 1 (codegen shape pinned) best %.4fms",
             self.name,
@@ -833,7 +872,7 @@ class CompositeKernel:
         )
         stage_two = self._stage_two_overrides(bound, best)
         best, perf = self._autotune_stage(
-            bound, args, stage2_effort, stage_two, seed=best
+            bounds, arg_sets, stage2_effort, stage_two, seed=best
         )
         logger.info(
             "Composite '%s': stage 2 (codegen shape free) best %.4fms",

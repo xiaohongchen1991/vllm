@@ -71,6 +71,7 @@ try:
     from vllm.benchmarks.lib.utils import default_vllm_config
     from vllm.kernels.helion import get_kernel_by_name, get_registered_kernels
     from vllm.kernels.helion.custom_baselines import CUSTOM_BASELINE_FNS
+    from vllm.kernels.helion.inputs import normalize_arg_sets
     from vllm.logger import init_logger
     from vllm.utils.import_utils import has_helion
 except ImportError as e:
@@ -426,6 +427,8 @@ def check_kernel_correctness(
     results: list[CorrectnessResult] = []
     for key, inputs in inputs_dict.items():
         case = str(key)
+        # Multi-input cases: check the first input, like the benchmark does.
+        inputs = normalize_arg_sets(inputs)[0]
         try:
             check_correctness(kernel, baseline_fn, inputs, case)
         except Exception as e:  # noqa: BLE001 - any failure is recorded, not fatal
@@ -521,6 +524,14 @@ def benchmark(
     rows: list[Row] = []
 
     for key, inputs in inputs_dict.items():
+        # Multi-input cases carry several synthetic inputs of the same shapes
+        # (e.g. different routings); measure the first one.
+        arg_sets = normalize_arg_sets(inputs)
+        if len(arg_sets) > 1:
+            logger.info(
+                "Case %s carries %d inputs; measuring the first", key, len(arg_sets)
+            )
+        inputs = arg_sets[0]
         logger.info("Benchmarking case %s", key)
 
         check_correctness(kernel, correctness_fn, inputs, str(key))
