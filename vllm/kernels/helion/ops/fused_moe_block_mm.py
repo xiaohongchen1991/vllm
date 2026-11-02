@@ -28,6 +28,9 @@ from vllm.kernels.helion.register import register_kernel
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
+    fused_topk,
+)
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 
 logger = init_logger(__name__)
@@ -36,21 +39,38 @@ GROUP_K = 128
 GROUP_N = 128
 
 
-def _simulate_topk_ids(num_tokens: int, E: int, top_k: int) -> torch.Tensor:
-    """Per-token top_k expert ids from a simulated uniform router.
+def _simulate_routing(
+    num_tokens: int,
+    E: int,
+    top_k: int,
+    routing_seed: int = 0,
+    scale_dtype: torch.dtype = torch.float32,
+    fixed_seed: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """One synthetic routing draw: top_k expert ids and their routed weights.
 
-    Mirrors ``simulate_expert_counts``: Gaussian gating logits, top_k selection
-    (distinct experts per token), seeded per shape for reproducibility. Runs
-    eagerly so it produces concrete ids under the autotuner's FakeTensorMode.
+    Gaussian gating logits (i.i.d. across experts, i.e. uniform expected load)
+    pushed through the production router, ``fused_topk``, exactly as
+    ``mega_moe_block_mm`` does. With ``fixed_seed`` the draw is seeded per shape
+    and draw so autotuning is reproducible; otherwise it comes from the global
+    RNG. Runs eagerly so it produces concrete values under the autotuner's
+    FakeTensorMode.
     """
     from torch._subclasses.fake_tensor import unset_fake_temporarily
 
     with unset_fake_temporarily():
-        gen = torch.Generator(device="cuda").manual_seed(
-            num_tokens * 1000 + E * 10 + top_k
+        gen = (
+            torch.Generator(device="cuda").manual_seed(
+                num_tokens * 1000 + E * 10 + top_k + routing_seed * 7919
+            )
+            if fixed_seed
+            else None
         )
-        gating = torch.randn(num_tokens, E, device="cuda", generator=gen)
-        return gating.topk(top_k, dim=-1).indices.to(torch.int32)
+        gating = torch.randn(
+            num_tokens, E, dtype=scale_dtype, device="cuda", generator=gen
+        )
+        topk_weights, topk_ids, _ = fused_topk(gating, gating, top_k, renormalize=True)
+    return topk_ids, topk_weights
 
 
 def _generate_input(
@@ -61,8 +81,6 @@ def _generate_input(
     top_k: int,
     fp8: torch.dtype,
 ) -> tuple[Any, ...]:
-    from torch._subclasses.fake_tensor import unset_fake_temporarily
-
     scale_dtype = torch.float32
     out_dtype = torch.bfloat16
     scale = 1.0 / math.sqrt(K)
@@ -79,16 +97,7 @@ def _generate_input(
     num_group_i = intermediate // GROUP_N
     num_group_h = H // GROUP_N
 
-    topk_ids = _simulate_topk_ids(num_tokens, E, top_k)
-
-    # Routed combine weights, seeded per shape like the ids.
-    with unset_fake_temporarily():
-        gen = torch.Generator(device="cuda").manual_seed(
-            num_tokens * 1000 + top_k * 10 + 7
-        )
-        topk_weights = torch.rand(
-            num_tokens, top_k, dtype=scale_dtype, device="cuda", generator=gen
-        )
+    topk_ids, topk_weights = _simulate_routing(num_tokens, E, top_k)
 
     scale2 = 1.0 / math.sqrt(intermediate)
     hidden_states = (scale * (0.5 + torch.rand(num_tokens, K, device="cuda"))).to(fp8)
@@ -155,8 +164,9 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
 
     # (E, top_k, (K, N)) entries.
     e_topk_kn_list: list[tuple[int, int, tuple[int, int]]] = [
-        (256, 8, (2048, 1024)),
+        # (256, 8, (2048, 1024)),
         # (256, 8, (512, 2048)),
+        (256, 8, (6144, 4096)),
     ]
 
     inputs = {}
@@ -386,12 +396,24 @@ def _moe_block_align_op(
     # Dense layout at block_size 1 (and no expert_map): block b is routed
     # slot b, so the GEMM loops derive the slot mapping from the block id
     # (Triton fused_moe's naive_block_assignment) and never load the sorted
-    # ids. The returned views cost no device work, and their shapes match the
-    # fake impl's formulas at m_block_size == 1 (max_padded == num_valid).
+    # ids. The returned views cost no device work; the padded count is the
+    # whole routed space, as in the aligned case below, and the shapes match
+    # the fake impl's formulas at m_block_size == 1 (max_padded == num_valid).
     if m_block_size == 1 and expert_map is None:
         flat = topk_ids.reshape(-1)
-        return flat, flat, flat[:1]
-    return moe_align_block_size(topk_ids, m_block_size, global_num_experts, expert_map)
+        num_tokens_post_pad = torch.full(
+            (1,), flat.numel() * m_block_size, dtype=torch.int32, device=flat.device
+        )
+        return flat, flat, num_tokens_post_pad
+    # Compact layout, as mega_moe_block_mm.py::_align_routing: a slot routed to
+    # another rank gets no block, so the GEMM loops never iterate over it.
+    return moe_align_block_size(
+        topk_ids,
+        m_block_size,
+        global_num_experts,
+        expert_map,
+        ignore_invalid_experts=True,
+    )
 
 
 @_moe_block_align_op.register_fake
@@ -425,6 +447,7 @@ def _(
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         autotune_baseline_accuracy_check_fn=_baseline_accuracy_check,
+        autotune_config_overrides={"cross_loop_pipeline": "barrier"},
         ignore_warnings=[
             helion.exc.TensorOperationInWrapper,
             helion.exc.ProcessGroupNameNotFound,
@@ -454,7 +477,6 @@ def fused_moe_block_mm(
     N = w1.shape[1]
     assert w1.shape[1] == 2 * intermediate
 
-    hl.specialize(num_tokens)
     hl.specialize(H)
     hl.specialize(E)
     hl.specialize(intermediate)
@@ -523,20 +545,23 @@ def fused_moe_block_mm(
     min_scaling_factor = 1.0 / (qtype_max * 512.0)
 
     # m_block_size is the moe_align block size: each expert block holds up to
-    # this many routed rows. Under num_tokens*top_k < E the padded space is
-    # capped at numel*m_block_size, so there are at most num_valid blocks and
-    # expert_ids has exactly num_valid entries. The block loops therefore tile
-    # the block space [0, num_valid) one block at a time. At m_block_size == 1
-    # (and no expert_map) the align op returns the dense layout instead --
-    # block b is routed slot b, derived in-kernel (Triton fused_moe's
-    # naive_block_assignment) -- so no alignment kernels run.
+    # this many routed rows, and the align kernel emits one block per on-rank
+    # expert segment (compact layout). The block loops therefore tile
+    # expert_ids' worst-case buffer and prune the tail against the device-side
+    # padded count -- the count stays on the device, so nothing reads back to
+    # the host. At m_block_size == 1 (and no expert_map) the align op returns
+    # the dense layout instead -- block b is routed slot b, derived in-kernel
+    # (Triton fused_moe's naive_block_assignment) -- so no alignment kernels
+    # run.
     m_block_size = hl.register_block_size(num_tokens)
-    sorted_token_ids, expert_ids, _ = torch.ops.vllm_helion.moe_block_align(
-        topk_ids, expert_map, m_block_size, global_num_experts
+    sorted_token_ids, expert_ids, num_tokens_post_padded = (
+        torch.ops.vllm_helion.moe_block_align(
+            topk_ids, expert_map, m_block_size, global_num_experts
+        )
     )
     max_padded = sorted_token_ids.size(0)
+    num_blocks = expert_ids.size(0)
     num_valid = num_tokens * top_k
-    hl.specialize(num_valid)
 
     # Intermediates staged in the preallocated workspace caches (metadata-only
     # resize, no allocation). gate_up is the bf16 [num_valid, N] projection in
@@ -593,74 +618,89 @@ def fused_moe_block_mm(
     # GEMM1: gate_up projection over the full N width (free N tiling now that
     # silu+quant is a separate loop), gathering the per-token activation by
     # offs_token // top_k.
-    for tile_gm1, tile_n1, outer_k1 in hl.tile(
-        [num_valid, N, H], block_size=[1, None, k_block_size_1]
+    for tile_gm1, tile_m1, tile_n1, outer_k1 in hl.tile(
+        [num_blocks, m_block_size, N, H],
+        block_size=[1, m_block_size, None, k_block_size_1],
     ):
         blk1 = tile_gm1.begin
-        e1 = expert_ids[blk1]
+        ntp1 = num_tokens_post_padded[0]
 
-        # Skip fully-padded blocks: moe_align fills the expert_ids tail with -1
-        # (and expert_map marks off-rank experts -1), so this is Triton's
-        # `off_experts == -1` early return. `e1` is program-uniform, so the
-        # branch drops the whole MMA for no-op tiles without lane divergence.
-        if e1 >= 0:
-            # Expand this block to its m_block_size sorted rows. The block may
-            # spill past sorted_token_ids (padding tail), so mask spill lanes.
-            rows1 = blk1 * m_block_size + hl.arange(m_block_size)
-            if m_block_size == 1 and expert_map is None:
-                # Dense layout: block b is routed slot b, derived
-                # arithmetically -- no sorted-ids load, no padding.
-                offs_token1 = rows1
-                token_mask1 = rows1 < num_valid
-            else:
-                row_mask1 = rows1 < max_padded
-                offs_token1 = hl.load(sorted_token_ids, [rows1], extra_mask=row_mask1)
-                token_mask1 = row_mask1 & (offs_token1 < num_valid)
-            a_rows1 = torch.where(token_mask1, offs_token1 // top_k, 0)
+        # Blocks past the padded routed-slot count are the worst-case tail of
+        # expert_ids; `ntp1` is a device scalar, so the grid stays at the tight
+        # host-computable bound and the tail prunes here. Program-uniform, so
+        # the branch drops the whole MMA for no-op tiles without lane
+        # divergence.
+        if blk1 * m_block_size < ntp1:
+            e1 = expert_ids[blk1]
 
-            acc1 = hl.zeros([m_block_size, tile_n1], torch.float32)
+            # Skip fully-padded blocks: moe_align fills the expert_ids tail with
+            # -1, so this is Triton's `off_experts == -1` early return. It is a
+            # separate test from the count above: only blocks inside the count
+            # can have real rows to write.
+            if e1 >= 0:
+                # This block's m_block_size sorted rows. The block may spill
+                # past sorted_token_ids (padding tail), so mask spill lanes.
+                rows1 = blk1 * m_block_size + tile_m1.index
+                if m_block_size == 1 and expert_map is None:
+                    # Dense layout: block b is routed slot b, derived
+                    # arithmetically -- no sorted-ids load, no padding.
+                    offs_token1 = rows1
+                    token_mask1 = rows1 < num_valid
+                else:
+                    row_mask1 = rows1 < max_padded
+                    offs_token1 = hl.load(
+                        sorted_token_ids, [rows1], extra_mask=row_mask1
+                    )
+                    token_mask1 = row_mask1 & (offs_token1 < num_valid)
+                a_rows1 = torch.where(token_mask1, offs_token1 // top_k, 0)
 
-            # Keep block_size = group_h for the H dimension so the block scale
-            # is constant across each inner tile.
-            for tile_h1 in hl.tile(outer_k1.begin, outer_k1.end, block_size=group_h):
-                a_blk1 = hl.load(
-                    a1q, [a_rows1, tile_h1], extra_mask=token_mask1[:, None]
-                )
-                w1_blk = w1[e1, tile_n1, tile_h1]
+                acc1 = hl.zeros([tile_m1, tile_n1], torch.float32)
 
-                if swap_ab_1:
-                    acc_blk1 = (
-                        hl.dot(w1_blk, a_blk1.t(), out_dtype=acc_dtype)
-                        .t()
-                        .to(torch.float32)
+                # Keep block_size = group_h for the H dimension so the block
+                # scale is constant across each inner tile.
+                for tile_h1 in hl.tile(
+                    outer_k1.begin, outer_k1.end, block_size=group_h
+                ):
+                    a_blk1 = hl.load(
+                        a1q, [a_rows1, tile_h1], extra_mask=token_mask1[:, None]
+                    )
+                    w1_blk = w1[e1, tile_n1, tile_h1]
+
+                    if swap_ab_1:
+                        acc_blk1 = (
+                            hl.dot(w1_blk, a_blk1.t(), out_dtype=acc_dtype)
+                            .t()
+                            .to(torch.float32)
+                        )
+                    else:
+                        acc_blk1 = hl.dot(a_blk1, w1_blk.t(), out_dtype=acc_dtype).to(
+                            torch.float32
+                        )
+
+                    gh_idx1 = tile_h1.id
+                    a_scales_blk1 = hl.load(
+                        a1q_scale,
+                        [a_rows1, gh_idx1 + hl.arange(1)],
+                        extra_mask=token_mask1[:, None],
+                    )
+                    w1_scale_blk = w1_scale[e1, tile_n1.index // group_i, gh_idx1][
+                        None, :
+                    ]
+                    acc1 = acc1 + (a_scales_blk1 * w1_scale_blk) * acc_blk1
+
+                out_rows1 = torch.where(token_mask1, offs_token1, 0)
+
+                if split_k_1 == 1:
+                    hl.store(
+                        gate_up,
+                        [out_rows1, tile_n1],
+                        acc1.to(out_dtype),
+                        extra_mask=token_mask1[:, None],
                     )
                 else:
-                    acc_blk1 = hl.dot(a_blk1, w1_blk.t(), out_dtype=acc_dtype).to(
-                        torch.float32
-                    )
-
-                gh_idx1 = tile_h1.id
-                a_scales_blk1 = hl.load(
-                    a1q_scale,
-                    [a_rows1, gh_idx1 + hl.arange(1)],
-                    extra_mask=token_mask1[:, None],
-                )
-                w1_scale_blk = w1_scale[e1, tile_n1.index // group_i, gh_idx1][None, :]
-                acc1 = acc1 + (a_scales_blk1 * w1_scale_blk) * acc_blk1
-
-            out_rows1 = torch.where(token_mask1, offs_token1, 0)
-
-            if split_k_1 == 1:
-                hl.store(
-                    gate_up,
-                    [out_rows1, tile_n1],
-                    acc1.to(out_dtype),
-                    extra_mask=token_mask1[:, None],
-                )
-            else:
-                # Masked lanes contribute 0 (their a1q / scale loads are masked
-                # to 0), so redirect their atomic to a valid row.
-                hl.atomic_add(gate_up, [out_rows1, tile_n1], acc1.to(out_dtype))
+                    # Masked lanes contribute 0 (their a1q / scale loads are
+                    # masked to 0), so redirect their atomic to a valid row.
+                    hl.atomic_add(gate_up, [out_rows1, tile_n1], acc1.to(out_dtype))
 
     for tile_sm, tile_sg, tile_sn in hl.tile(
         [num_valid, num_group_i, group_i], block_size=[1, None, group_i]
@@ -685,14 +725,21 @@ def fused_moe_block_mm(
     # weight (Triton's mul_routed_weight), staged per routed row in mm2_out --
     # stored whole at split_k_2 == 1, atomically accumulated over the split-K
     # slices otherwise (mirroring GEMM1's split_k_1 pattern).
-    for tile_gm2, tile_h2, outer_k2 in hl.tile(
-        [num_valid, H, intermediate], block_size=[1, None, k_block_size_2]
+    for tile_gm2, tile_m2, tile_h2, outer_k2 in hl.tile(
+        [num_blocks, m_block_size, H, intermediate],
+        block_size=[1, m_block_size, None, k_block_size_2],
     ):
         blk2 = tile_gm2.begin
-        e2 = expert_ids[blk2]
+        ntp2 = num_tokens_post_padded[0]
 
-        if e2 >= 0:
-            rows2 = blk2 * m_block_size + hl.arange(m_block_size)
+        # As in GEMM1: prune the worst-case tail of expert_ids against the
+        # device-side padded count first, then the -1 blocks inside the count.
+        if blk2 * m_block_size < ntp2:
+            e2 = expert_ids[blk2]
+
+            # This block's m_block_size sorted rows, shared by both stores below
+            # (the real block's rows and the off-rank zero-fill).
+            rows2 = blk2 * m_block_size + tile_m2.index
             if m_block_size == 1 and expert_map is None:
                 # Dense layout: block b is routed slot b, derived
                 # arithmetically -- no sorted-ids load, no padding.
@@ -702,59 +749,80 @@ def fused_moe_block_mm(
                 row_mask2 = rows2 < max_padded
                 offs_token2 = hl.load(sorted_token_ids, [rows2], extra_mask=row_mask2)
                 token_mask2 = row_mask2 & (offs_token2 < num_valid)
-            # a2q is in routed-row order, so gather by offs_token directly.
-            a2q_rows = torch.where(token_mask2, offs_token2, 0)
 
-            acc = hl.zeros([m_block_size, tile_h2], torch.float32)
+            if e2 >= 0:
+                # a2q is in routed-row order, so gather by offs_token directly.
+                a2q_rows = torch.where(token_mask2, offs_token2, 0)
 
-            for tile_i2 in hl.tile(outer_k2.begin, outer_k2.end, block_size=group_i):
-                a2q_blk = hl.load(
-                    a2q, [a2q_rows, tile_i2], extra_mask=token_mask2[:, None]
+                acc = hl.zeros([tile_m2, tile_h2], torch.float32)
+
+                for tile_i2 in hl.tile(
+                    outer_k2.begin, outer_k2.end, block_size=group_i
+                ):
+                    a2q_blk = hl.load(
+                        a2q, [a2q_rows, tile_i2], extra_mask=token_mask2[:, None]
+                    )
+                    w2_blk = w2[e2, tile_h2, tile_i2]
+
+                    if swap_ab_2:
+                        acc_blk = (
+                            hl.dot(w2_blk, a2q_blk.t(), out_dtype=acc_dtype)
+                            .t()
+                            .to(torch.float32)
+                        )
+                    else:
+                        acc_blk = hl.dot(a2q_blk, w2_blk.t(), out_dtype=acc_dtype).to(
+                            torch.float32
+                        )
+
+                    gi_idx = tile_i2.id
+                    a2q_scale_blk = hl.load(
+                        a2q_scale,
+                        [a2q_rows, gi_idx + hl.arange(1)],
+                        extra_mask=token_mask2[:, None],
+                    )
+                    w2_scale_blk = w2_scale[e2, tile_h2.index // group_h, gi_idx][
+                        None, :
+                    ]
+                    acc = acc + (a2q_scale_blk * w2_scale_blk) * acc_blk
+
+                out_rows = torch.where(token_mask2, offs_token2, 0)
+
+                # Routed weight per row (Triton's mul_routed_weight). Split-K
+                # partials are disjoint K-slices of the same output row, so
+                # weighting each partial equals weighting the total:
+                # sum_k(w * P_k) == w * P.
+                weight_blk = hl.load(
+                    topk_weights_flat, [out_rows], extra_mask=token_mask2
                 )
-                w2_blk = w2[e2, tile_h2, tile_i2]
+                acc = acc * weight_blk[:, None]
 
-                if swap_ab_2:
-                    acc_blk = (
-                        hl.dot(w2_blk, a2q_blk.t(), out_dtype=acc_dtype)
-                        .t()
-                        .to(torch.float32)
+                if split_k_2 == 1:
+                    # No split-K partials: store the per-slot row for the
+                    # combine loop below (each routed row written exactly once).
+                    hl.store(
+                        mm2_out,
+                        [out_rows, tile_h2],
+                        acc.to(out_dtype),
+                        extra_mask=token_mask2[:, None],
                     )
                 else:
-                    acc_blk = hl.dot(a2q_blk, w2_blk.t(), out_dtype=acc_dtype).to(
-                        torch.float32
-                    )
-
-                gi_idx = tile_i2.id
-                a2q_scale_blk = hl.load(
-                    a2q_scale,
-                    [a2q_rows, gi_idx + hl.arange(1)],
-                    extra_mask=token_mask2[:, None],
-                )
-                w2_scale_blk = w2_scale[e2, tile_h2.index // group_h, gi_idx][None, :]
-                acc = acc + (a2q_scale_blk * w2_scale_blk) * acc_blk
-
-            out_rows = torch.where(token_mask2, offs_token2, 0)
-
-            # Routed weight per row (Triton's mul_routed_weight). Split-K
-            # partials are disjoint K-slices of the same output row, so
-            # weighting each partial equals weighting the total: sum_k(w * P_k)
-            # == w * P.
-            weight_blk = hl.load(topk_weights_flat, [out_rows], extra_mask=token_mask2)
-            acc = acc * weight_blk[:, None]
-
-            if split_k_2 == 1:
-                # No split-K partials: store the per-slot row for the moe_sum
-                # loop below (each routed row written exactly once).
+                    # Masked lanes contribute 0 (their a2q / scale loads are
+                    # masked to 0), so redirect their atomic to a valid row.
+                    hl.atomic_add(mm2_out, [out_rows, tile_h2], acc.to(out_dtype))
+            elif split_k_2 == 1:
+                # Off-rank block inside the count (expert_map maps its experts
+                # to -1): no MMA runs, but its slots' rows feed the top_k
+                # combine, so store defined zeros (Triton's write_zeros_to_output)
+                # -- their contribution from this rank is zero. split_k_2 > 1
+                # zeroes the whole buffer at launch, and an atomic
+                # zero-contribution would be a no-op anyway.
                 hl.store(
                     mm2_out,
-                    [out_rows, tile_h2],
-                    acc.to(out_dtype),
+                    [torch.where(token_mask2, offs_token2, 0), tile_h2],
+                    hl.zeros([tile_m2, tile_h2], out_dtype),
                     extra_mask=token_mask2[:, None],
                 )
-            else:
-                # Masked lanes contribute 0 (their a2q / scale loads are masked
-                # to 0), so redirect their atomic to a valid row.
-                hl.atomic_add(mm2_out, [out_rows, tile_h2], acc.to(out_dtype))
 
     # Combine: reduce the weighted routed rows over top_k into the layer
     # output (ops.moe_sum's reduction). GEMM2 wrote every routed row (stored
