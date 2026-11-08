@@ -13,9 +13,9 @@ per-token activations gathered in-kernel) and once as the down projection
 the GEMM derives each stage's activation layout from ``aq.shape[0]``. The down
 projection scales each output row by its routed slot's ``topk_weights``
 coefficient in its epilogue (Triton's ``mul_routed_weight``), and
-``ops.moe_sum`` reduces the weighted rows over top_k, so the composite models
-the complete MoE layer end to end, mirroring ``TritonExperts.apply`` (and the
-custom Triton baseline).
+the ``moe_sum`` combine reduces the weighted rows over top_k, so the composite
+models the complete MoE layer end to end, mirroring ``TritonExperts.apply``
+(and the custom Triton baseline).
 
 ``permuted``, ``fuse_moe_sum`` and ``m_block_size`` are root tunables
 (``run.tunable``).
@@ -23,10 +23,9 @@ custom Triton baseline).
 aligned block, shared by ``moe_align_block_size`` and both GEMM sites
 (Triton fused_moe's ``BLOCK_SIZE_M``); its default keeps the
 one-block-per-expert-segment layout of ``next_power_of_two(num_tokens)``.
-``permuted`` selects the expert-major layout instead: the standalone
-``moe_route`` kernel (called as its registered custom op, with its own
-separately autotuned configs -- it is not a composite child site) produces
-the aligned layout, the expert-major activation
+``permuted`` selects the expert-major layout instead: the ``moe_route``
+kernel (called through ``run``, so the composite tunes it with everything
+else) produces the aligned layout, the expert-major activation
 rows, and ``inv_perm`` from one launch (replacing ``_align_routing`` +
 ``moe_permute``), and both GEMM stages gather
 them through ``inv_perm``. GEMM1 also stores its gate_up output permuted
@@ -52,12 +51,13 @@ helion's own ``LFBOTreeSearch``, measuring every candidate end to end::
 
     python scripts/autotune_helion_kernels.py --kernels mega_moe_block_mm
 
-The composite owns the routing and the scratch buffers: it runs
-``moe_align_block_size`` once at the root-tuned ``m_block_size`` (both GEMMs
-consume that alignment) and resizes the preallocated workspace
-caches like the Triton baseline -- ``workspace2`` to the bf16 gate_up cache
-[num_tokens, top_k, N] (TritonExperts' intermediate_cache1) and ``workspace13``
-to the bf16 weighted GEMM2 output [num_tokens, top_k, H]. At
+The composite owns the routing and the scratch buffers: it runs the
+``moe_route`` child kernel once at the root-tuned ``m_block_size`` (both GEMMs
+consume that alignment; at ``m_block_size == 1`` with no expert map the dense
+layout needs no kernel) and views the preallocated workspace caches for every
+stage buffer instead of allocating: the wider-row cache hosts GEMM1's gate_up
+and then GEMM2's staged output, and the other hosts the routing scratch and
+then the act-quant outputs (each is dead before the next is written). At
 ``m_block_size == 1`` the alignment is skipped: every routed slot is its own
 block, so the GEMMs take the dense layout (``sorted_token_ids=None``) and
 derive slot = block in-kernel (Triton fused_moe's
@@ -96,12 +96,16 @@ from helion._testing import assert_close_with_mismatch_tolerance
 from helion.autotuner import BooleanFragment, PowerOfTwoFragment
 
 from vllm import _custom_ops as ops
-
-# Imported for its registration side effect: the permuted branch below calls
-# the registered custom op, which must exist regardless of ops import order.
+from vllm.kernels.helion.composite import FREE, PIN, CompositeStagePlan
 from vllm.kernels.helion.inputs import CaseInputs
-from vllm.kernels.helion.ops import moe_route as _moe_route_module  # noqa: F401
-from vllm.kernels.helion.register import register_kernel
+from vllm.kernels.helion.ops import moe_route as _moe_route_module
+from vllm.kernels.helion.ops import moe_silu_and_mul_per_block_quant as _act_quant
+from vllm.kernels.helion.ops import moe_sum as _moe_sum_module
+from vllm.kernels.helion.ops import per_token_group_fp8_quant as _per_token_quant_module
+from vllm.kernels.helion.register import (
+    create_helion_decorated_kernel,
+    register_kernel,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -113,11 +117,51 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     swiglu_limit_func,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 
 logger = init_logger(__name__)
 
 GROUP_K = 128
 GROUP_N = 128
+
+# The unfused act+quant stage as a composite child site: the same kernel the
+# registered op wraps, but dispatched through ``run`` so the composite owns its
+# config (and its grid is pruned by the routed-slot count in-kernel).
+_ACT_QUANT_CHILD = create_helion_decorated_kernel(
+    _act_quant.moe_silu_and_mul_per_block_quant.raw_kernel_func,
+    _act_quant.moe_silu_and_mul_per_block_quant.helion_settings,
+    {},
+)
+
+# The routing stage, likewise as a child site: the same kernel its registered
+# op wraps, so the composite tunes it jointly instead of dispatching an op with
+# its own separately tuned configs.
+_MOE_ROUTE_CHILD = create_helion_decorated_kernel(
+    _moe_route_module.moe_route.raw_kernel_func,
+    _moe_route_module.moe_route.helion_settings,
+    {},
+)
+
+# Internal block quant for an unquantized activation (``fp8_input=False``),
+# also a child site rather than its registered op: the op carries a per-GPU
+# pre-tuned config, while the composite tunes this stage against the GEMMs it
+# feeds.
+_PER_TOKEN_GROUP_FP8_QUANT_CHILD = create_helion_decorated_kernel(
+    _per_token_quant_module.per_token_group_fp8_quant.raw_kernel_func,
+    _per_token_quant_module.per_token_group_fp8_quant.helion_settings,
+    {},
+)
+
+# The unfused combine, as a child site: reducing the weighted routed rows over
+# top_k is a pass over the H-wide staging cache, so the composite tunes it
+# against the GEMM that wrote it instead of dispatching the pre-tuned op.
+_MOE_SUM_CHILD = create_helion_decorated_kernel(
+    _moe_sum_module.moe_sum.raw_kernel_func,
+    _moe_sum_module.moe_sum.helion_settings,
+    {},
+)
 
 # Masked atomic accumulate into the output rows. Mirrors ``hl.atomic_add``,
 # which has no mask argument: masked lanes are skipped outright instead of being
@@ -127,6 +171,21 @@ GROUP_N = 128
 # index, ``{v}`` values, ``{m}`` lane mask.
 _MASKED_ATOMIC_ADD = (
     "tl.atomic_add({p} + {r}[:, None] + {n}[None, :], {v}, mask={m}, sem='relaxed')"
+)
+
+# Tuning schedule (see CompositeStagePlan): the layer's layout -- routing and
+# the silu+quant epilogue -- is cheap to search against a fixed GEMM structure,
+# and the GEMMs are then searched against the chosen layout. Both GEMM sites
+# are frozen at their defaults in stage 1 and freed in stage 2; moe_route is
+# searched in both, because its block sizes track the layout the GEMMs consume.
+# Site names are `<child kernel>.<call index>`, in body call order.
+STAGE_PLAN = CompositeStagePlan(
+    # Stage 1: the layout and the quant epilogues are searched against the
+    # default structure.
+    (PIN, "root", "moe_block_mm.0", "moe_block_mm.1"),
+    # Stage 2: the structure and root are searched against that layout, with
+    # everything not named (the quant epilogues) pinned where stage 1 left it.
+    (FREE, "root", "moe_block_mm.0", "moe_block_mm.1", "moe_route.0"),
 )
 
 
@@ -148,6 +207,7 @@ def _align_sizes(
 # here, so this kernel carries no autotune overrides of its own.
 @helion.kernel(
     static_shapes=False,
+    fast_math=True,
     ignore_warnings=[
         helion.exc.TensorOperationInWrapper,
         helion.exc.ProcessGroupNameNotFound,
@@ -816,12 +876,12 @@ def generate_inputs() -> dict[CaseKey, CaseInputs]:
     # quantizes before the MoE). Set it to False to hand the kernel bf16
     # activations instead, which it quantizes internally -- the shape
     # FlashInfer's block-scale kernel expects, so it can be compared directly.
-    fp8_input = True
+    fp8_input = False
 
     # The Helion kernel is autotuned per shape.
     # num_tokens_list follows the cudagraph_capture_sizes pattern but is capped
     # here to cover only small values.
-    num_tokens_list = [1, 2, 4, 8, 16, 24, 32]
+    num_tokens_list = [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256]
 
     fp8: torch.dtype = current_platform.fp8_dtype()
 
@@ -1006,6 +1066,35 @@ def _silu_mul_block_quant(
     )
 
 
+def _stage_pair(
+    cache: torch.Tensor | None,  # bf16 workspace cache; None = always allocate
+    device: torch.device,
+    val_nbytes: int,
+    val_dtype: torch.dtype,
+    val_shape: tuple[int, ...],
+    scale_shape: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Carve an (fp8 values, float32 scales) pair out of ``cache``.
+
+    The stage scratch these replace is dead before the next stage writes, so one
+    cache covers all of them; a shape whose pair does not fit gets fresh buffers
+    instead (decided at trace time, so still outside any captured region).
+    """
+    n_scale = math.prod(scale_shape) * 4
+    capacity = 0 if cache is None else cache.numel() * cache.element_size()
+    if cache is None or val_nbytes + n_scale > capacity:
+        return (
+            torch.empty(val_shape, dtype=val_dtype, device=device),
+            torch.empty(scale_shape, dtype=torch.float32, device=device),
+        )
+    buf = cache.view(-1).view(torch.uint8)
+    values = buf[:val_nbytes].view(val_dtype).view(val_shape)
+    scales = (
+        buf[val_nbytes : val_nbytes + n_scale].view(torch.float32).view(scale_shape)
+    )
+    return values, scales
+
+
 def baseline(
     output: torch.Tensor,  # [num_tokens, H] out_dtype (reduced layer output)
     hidden_states: torch.Tensor,  # [num_tokens, K] fp8
@@ -1142,6 +1231,7 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
     input_generator=generate_inputs,
     fake_impl=fake_impl,
     use_variant_config=True,
+    stage_plan=STAGE_PLAN,
     helion_settings=helion.Settings(
         autotune_baseline_fn=baseline,
         autotune_baseline_accuracy_check_fn=_baseline_accuracy_check,
@@ -1181,7 +1271,7 @@ def mega_moe_block_mm(
         PowerOfTwoFragment(
             1,
             helion.next_power_of_2(num_tokens),
-            default_val=helion.next_power_of_2(num_tokens),
+            default_val=helion.next_power_of_2(routed // global_num_experts) * 2,
         ),
     )
 
@@ -1210,55 +1300,126 @@ def mega_moe_block_mm(
     fuse_act_quant = run.tunable("fuse_act_quant", BooleanFragment())
     fused_act_quant = fuse_act_quant and split_k_1 == 1
 
-    # The permuted mode routes through the standalone moe_route kernel,
-    # called as its registered custom op (torch.ops.vllm_helion.moe_route) so
-    # it picks its own pre-tuned config and stays out of the composite's
-    # joint config space: one fused launch produces the aligned layout
-    # (sorted_token_ids / expert_ids), the expert-major permuted activations
-    # and scales, inv_perm, and the padded routed-slot count -- replacing
-    # _align_routing + moe_permute. Both GEMM stages then gather through
-    # inv_perm (GEMM1 also stores permuted, keeping the intermediate
-    # contiguous per expert, while GEMM2 scatters its weighted output to the
-    # routed slots' token-order rows, so the combine is always a contiguous
-    # moe_sum). The unpermuted mode keeps _align_routing's layout:
-    # moe_align_block_size wins the alignment-only case, degenerating to the
-    # dense layout (no align kernel) at align_block_size == 1. Either way the
-    # count flows to both GEMMs as a device tensor -- their grids stay at the
-    # worst-case bound and prune the tail in-kernel, so nothing reads back to
-    # the host.
+    # Both modes route through the moe_route kernel as a child site (``run``),
+    # so its config is tuned with the composite's other sites. Permuted, one
+    # fused launch produces the aligned layout (sorted_token_ids / expert_ids),
+    # the expert-major permuted activations and scales, inv_perm, and the
+    # padded routed-slot count -- replacing align + moe_permute; both GEMM
+    # stages then gather through inv_perm (GEMM1 also stores permuted, keeping
+    # the intermediate contiguous per expert, while GEMM2 scatters its weighted
+    # output to the routed slots' token-order rows, so the combine is always a
+    # contiguous moe_sum). Unpermuted, the same kernel runs without a
+    # permutation source, yielding just the aligned layout. The one shortcut
+    # left is the dense layout at align_block_size == 1 with no expert_map,
+    # where every routed slot is its own block and no routing kernel is needed.
+    # Either way the count flows to both GEMMs as a device tensor -- their
+    # grids stay at the worst-case bound and prune the tail in-kernel, so
+    # nothing reads back to the host.
 
     # Internal quantization: a non-fp8 activation is quantized here, one dynamic
     # scale per 128-column group, exactly as the Triton block-quant path does
     # ahead of its GEMMs -- so the routing child and both GEMM sites always see
     # fp8 plus scales, and a caller may hand over the layer's bf16 input (the
     # shape FlashInfer's block-scale kernel takes).
+    # Workspace roles: ``big`` is the cache whose row is wide enough for
+    # max(N, H), so it hosts GEMM1's gate_up and then GEMM2's staged output
+    # (gate_up is dead once the act-quant consumed it). ``small`` hosts the
+    # routing scratch -- the internally quantized activations or the permuted
+    # copies -- and then the act-quant's outputs, all of which are dead before
+    # the next one is written. Every allocation in this body is therefore a view
+    # of a caller-owned cache.
+    if fused_act_quant:
+        # GEMM1 writes the act-quant outputs itself, so it is the one that needs
+        # two free caches: hq rides workspace2, GEMM2 stages into workspace13
+        # (the historical layout), and the routing scratch has no cache left --
+        # it is allocated up front instead.
+        big, small = workspace13, workspace2
+        route_cache = perm_cache = None
+    else:
+        big, small = (workspace2, workspace13) if N >= H else (workspace13, workspace2)
+        route_cache = big if not unpermuted else small
+        perm_cache = small
     if hidden_states.dtype == current_platform.fp8_dtype():
         assert a1q_scale is not None
         aq, aq_scale = hidden_states, a1q_scale
     else:
         assert a1q_scale is None
-        aq, aq_scale = moe_kernel_quantize_input(
-            hidden_states,
-            None,
+        # One row per token, like the fp8-input path: routing copies a slot's
+        # source row as ``source_aq[slot // top_k]``, so ``aq`` is token-indexed
+        # until the permutation widens it to one row per routed slot.
+        aq, aq_scale = _stage_pair(
+            route_cache,
+            hidden_states.device,
+            hidden_states.numel(),
             current_platform.fp8_dtype(),
+            hidden_states.shape,
+            (num_tokens, hidden_states.shape[1] // GROUP_K),
+        )
+        fp8_min, fp8_max = get_fp8_min_max()
+        run(
+            _PER_TOKEN_GROUP_FP8_QUANT_CHILD,
+            hidden_states,
+            aq,
+            aq_scale,
+            GROUP_K,
+            1e-10,
+            fp8_min,
+            fp8_max,
             False,
-            [GROUP_K, GROUP_K],
         )
     inv_perm = None
-    if not unpermuted:
+    num_valid = None
+    device = hidden_states.device
+    # The unfused act-quant outputs are views of the routing cache (carved here,
+    # before the child launches). Nothing in this body allocates after a child
+    # launch: ``moe_route`` is multi-phase, so helion allocates its grid-barrier
+    # semaphore at the end of that child's call, and inside a CUDA graph a later
+    # allocation in the same capture would take that block and leave the
+    # recorded barrier pointing at it (faults at replay).
+    hq = hq_scale = None
+    if not fused_act_quant:
+        hq, hq_scale = _stage_pair(
+            small,
+            device,
+            routed * intermediate,
+            torch.float8_e4m3fn,
+            (routed, intermediate),
+            (routed, num_group_i),
+        )
+    if unpermuted and align_block_size == 1 and expert_map is None:
+        # Dense layout: every routed slot is its own block, so the alignment --
+        # and its kernel -- is skipped entirely (sorted_token_ids=None selects
+        # the GEMMs' naive block assignment) and the count is the routed total.
+        sorted_token_ids = None
+        expert_ids = topk_ids.view(-1)
+        num_tokens_post_pad = torch.full((1,), routed, dtype=torch.int32, device=device)
+    else:
         max_padded, num_blocks = _align_sizes(
             num_tokens, top_k, global_num_experts, align_block_size
         )
-        device = hidden_states.device
         sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
         expert_ids = torch.empty(num_blocks, dtype=torch.int32, device=device)
-        permuted_aq = torch.empty((routed, aq.shape[1]), dtype=aq.dtype, device=device)
-        permuted_scale = torch.empty(
-            (routed, aq_scale.shape[1]), dtype=aq_scale.dtype, device=device
-        )
-        inv_perm = torch.empty(routed, dtype=torch.int32, device=device)
         num_tokens_post_pad = torch.empty(1, dtype=torch.int32, device=device)
-        torch.ops.vllm_helion.moe_route(
+        # The child's inputs differ only by the permutation: without a source
+        # there is nothing to permute, and leaving ``num_valid`` unset skips a
+        # store the routing-only path does not consume.
+        if unpermuted:
+            source_aq = source_scale = None
+            permuted_aq = permuted_scale = None
+        else:
+            source_aq, source_scale = aq, aq_scale
+            permuted_aq, permuted_scale = _stage_pair(
+                perm_cache,
+                device,
+                routed * aq.shape[1],
+                aq.dtype,
+                (routed, aq.shape[1]),
+                (routed, aq_scale.shape[1]),
+            )
+            inv_perm = torch.empty(routed, dtype=torch.int32, device=device)
+            num_valid = torch.empty(1, dtype=torch.int32, device=device)
+        run(
+            _MOE_ROUTE_CHILD,
             topk_ids,
             expert_map,
             sorted_token_ids,
@@ -1267,18 +1428,17 @@ def mega_moe_block_mm(
             top_k,
             align_block_size,
             global_num_experts,
-            aq,
-            aq_scale,
+            w1.shape[0],  # local experts: moe_route keys its config on EP
+            source_aq,
+            source_scale,
             permuted_aq,
             permuted_scale,
             inv_perm,
             num_tokens_post_pad,
+            num_valid,
         )
-        aq, aq_scale = permuted_aq, permuted_scale
-    else:
-        sorted_token_ids, expert_ids, num_tokens_post_pad = _align_routing(
-            topk_ids, expert_map, global_num_experts, align_block_size
-        )
+        if not unpermuted:
+            aq, aq_scale = permuted_aq, permuted_scale
 
     # GEMM1: gate_up projection, staged in workspace2 like the Triton baseline
     # (TritonExperts' intermediate_cache1). The fused epilogue writes fp8
@@ -1286,13 +1446,17 @@ def mega_moe_block_mm(
     # of that cache so the timed region allocates nothing: the fp8 rows first,
     # then the float32 scales (whose offset stays 4-byte aligned because the
     # intermediate is a multiple of GROUP_K).
-    cached = _resize_cache(workspace2, (num_tokens, top_k, N))
     if fused_act_quant:
-        buf = cached.view(-1).view(torch.uint8)
-        n_q = routed * intermediate
-        n_s = routed * num_group_i * 4
-        hq = buf[:n_q].view(torch.float8_e4m3fn).view(routed, intermediate)
-        hq_scale = buf[n_q : n_q + n_s].view(torch.float32).view(routed, num_group_i)
+        # The fused epilogue writes the act-quant outputs, so they take the
+        # routing cache's place and ``big`` is left for GEMM2's staging.
+        hq, hq_scale = _stage_pair(
+            small,
+            device,
+            routed * intermediate,
+            torch.float8_e4m3fn,
+            (routed, intermediate),
+            (routed, num_group_i),
+        )
         run(
             moe_block_mm,
             hq,
@@ -1314,7 +1478,7 @@ def mega_moe_block_mm(
             hq_scale,
         )
     else:
-        gate_up = cached.view(routed, N)
+        gate_up = _resize_cache(big, (num_tokens, top_k, N)).view(routed, N)
         run(
             moe_block_mm,
             gate_up,
@@ -1336,15 +1500,25 @@ def mega_moe_block_mm(
             None,  # output_scale: no fused epilogue
         )
 
-        # silu_and_mul + per-block fp8 quant at the full routed M. With a clamp
-        # limit this runs as two steps and needs a bf16 activation buffer,
-        # staged in the still-unused workspace13 cache.
-        act = None
-        if clamp_limit is not None:
-            act = _resize_cache(workspace13, (num_tokens, top_k, intermediate)).view(
-                routed, intermediate
-            )
-        hq, hq_scale = _silu_mul_block_quant(gate_up, clamp_limit, act)
+        # silu_and_mul + per-block fp8 quant, run as a child site so the
+        # composite owns its config. The permuted layout stages its on-rank rows
+        # compactly, so it prunes them with the exact count; the unpermuted
+        # layout stages by routed-slot id (scattered), so it masks rows per slot
+        # from the routing instead -- the same test ``ops.moe_sum`` applies. Its
+        # outputs are the ones allocated up front (workspace2 still holds
+        # gate_up and workspace13 stages GEMM2's output, so neither can host
+        # them).
+        run(
+            _ACT_QUANT_CHILD,
+            hq,
+            gate_up,
+            hq_scale,
+            GROUP_K,
+            clamp_limit,
+            None if unpermuted else num_valid,
+            topk_ids if unpermuted else None,
+            expert_map if unpermuted else None,
+        )
 
     # GEMM2: down projection over the per-routed-row quantized intermediate.
     # Each row is scaled by its routed weight in the epilogue (Triton's
@@ -1355,7 +1529,7 @@ def mega_moe_block_mm(
     mm2_out = (
         None
         if fuse_moe_sum
-        else _resize_cache(workspace13, (num_tokens, top_k, H)).view(routed, H)
+        else _resize_cache(big, (num_tokens, top_k, H)).view(routed, H)
     )
     run(
         moe_block_mm,
@@ -1383,4 +1557,10 @@ def mega_moe_block_mm(
     # both layouts are compact, so GEMM2 never writes those rows and their
     # contribution from this rank is zero by construction.
     if not fuse_moe_sum:
-        ops.moe_sum(mm2_out.view(num_tokens, top_k, H), output, topk_ids, expert_map)
+        run(
+            _MOE_SUM_CHILD,
+            mm2_out.view(num_tokens, top_k, H),
+            output,
+            topk_ids,
+            expert_map,
+        )

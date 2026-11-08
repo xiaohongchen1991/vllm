@@ -166,7 +166,7 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     e_topk_kn_list: list[tuple[int, int, tuple[int, int]]] = [
         # (256, 8, (2048, 1024)),
         # (256, 8, (512, 2048)),
-        (256, 8, (6144, 4096)),
+        (256, 8, (6144, 512)),
     ]
 
     inputs = {}

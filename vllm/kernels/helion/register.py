@@ -60,7 +60,7 @@ from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
-from vllm.kernels.helion.composite import CompositeKernel
+from vllm.kernels.helion.composite import CompositeKernel, CompositeStagePlan
 from vllm.kernels.helion.inputs import CaseInputs, normalize_arg_sets
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
@@ -156,12 +156,14 @@ class ConfiguredHelionKernel:
         raw_kernel_func: Callable,
         helion_settings: helion.Settings | None = None,
         use_variant_config: bool = False,
+        stage_plan: CompositeStagePlan | None = None,
     ):
         self.op_name = op_name
         self.config_picker = config_picker
         self.raw_kernel_func = raw_kernel_func
         self.helion_settings = helion_settings
         self.use_variant_config = use_variant_config
+        self.stage_plan = stage_plan
         self._decorated_kernel = self._create_decorated_kernel()
 
     def __call__(self, *args, **kwargs):
@@ -253,7 +255,9 @@ class ConfiguredHelionKernel:
             # signature is the body minus its `run` parameter, matching the
             # registered custom op's schema.
             composite = CompositeKernel(
-                self.raw_kernel_func, settings=self.helion_settings
+                self.raw_kernel_func,
+                settings=self.helion_settings,
+                stage_plan=self.stage_plan,
             )
             runner_cache: dict[str, Callable] = {}
 
@@ -296,6 +300,7 @@ class HelionKernelWrapper:
         helion_settings: helion.Settings | None = None,
         input_generator: (Callable[[], dict[CaseKey, CaseInputs]] | None) = None,
         use_variant_config: bool = False,
+        stage_plan: CompositeStagePlan | None = None,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
@@ -308,6 +313,7 @@ class HelionKernelWrapper:
         self._input_generator = input_generator
         self._mutates_args = mutates_args
         self.use_variant_config = use_variant_config
+        self.stage_plan = stage_plan
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
         # which handles op enablement/disablement.
@@ -374,7 +380,9 @@ class HelionKernelWrapper:
             # child configs) space with helion's own LFBOTreeSearch, measuring
             # every candidate by running the whole body.
             composite = CompositeKernel(
-                self.raw_kernel_func, settings=self.helion_settings
+                self.raw_kernel_func,
+                settings=self.helion_settings,
+                stage_plan=self.stage_plan,
             )
             return composite.autotune(arg_sets, autotune_effort=autotune_effort)
 
@@ -404,6 +412,7 @@ class HelionKernelWrapper:
                 raw_kernel_func=self.raw_kernel_func,
                 helion_settings=self.helion_settings,
                 use_variant_config=self.use_variant_config,
+                stage_plan=self.stage_plan,
             )
         return self._configured_kernel
 
@@ -466,6 +475,7 @@ def register_kernel(
     helion_settings: helion.Settings | None = None,
     input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
     use_variant_config: bool = False,
+    stage_plan: CompositeStagePlan | None = None,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
@@ -503,6 +513,11 @@ def register_kernel(
             ``nvidia_h100_pcie``) instead of the canonical name shared by all
             variants (e.g. ``nvidia_h100``). Defaults to ``False``, which
             preserves the canonical-name lookup used by most kernels.
+
+        stage_plan: Optional. Site groups for the composite kernel's
+            three-stage autotune schedule (see ``CompositeStagePlan``). Only
+            meaningful for a composite body; ``None`` keeps the two-stage
+            schedule.
     """
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
@@ -535,6 +550,7 @@ def register_kernel(
             helion_settings=helion_settings,
             input_generator=input_generator,
             use_variant_config=use_variant_config,
+            stage_plan=stage_plan,
         )
 
         _REGISTERED_KERNELS[final_op_name] = kernel_wrapper

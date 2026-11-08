@@ -164,6 +164,7 @@ def baseline(
     config_picker=pick_config,
     input_generator=generate_inputs,
     helion_settings=helion.Settings(
+        fast_math=True,
         autotune_baseline_fn=baseline,
     ),
 )  # type: ignore[misc]
@@ -195,7 +196,7 @@ def per_token_group_fp8_quant(
     input = input.view(num_tokens, -1, group_size)
     output_q = output_q.view(num_tokens, -1, group_size)
     for tile_m, tile_gn, tile_n in hl.tile(
-        [num_tokens, groups_per_row, group_size], block_size=[1, None, group_size]
+        [num_tokens, groups_per_row, group_size], block_size=[None, None, group_size]
     ):
         x_blk = input[tile_m, tile_gn, tile_n]
         y_s_blk = torch.clamp(torch.amax(torch.abs(x_blk), dim=-1), min=eps)

@@ -31,6 +31,18 @@ def _block_scaled_mm(
     fp8_gemm_nt((a, a_scales), (b.T, b_scales.T), out, is_deep_gemm_e8m0_used=True)
 
 
+def _moe_sum(
+    input: torch.Tensor,  # [num_tokens, top_k, hidden_size]
+    output: torch.Tensor,  # [num_tokens, hidden_size] (out)
+    topk_ids: torch.Tensor | None = None,  # [num_tokens, top_k] int32
+    expert_map: torch.Tensor | None = None,  # [num_experts] int32, -1 = off-rank
+) -> None:
+    """Production ``moe_sum`` baseline for the Helion ``moe_sum`` kernel."""
+    from vllm import _custom_ops as ops
+
+    ops.moe_sum(input, output, topk_ids, expert_map)
+
+
 def _moe_block_mm(
     output: torch.Tensor,  # [num_tokens, H] bf16 (reduced layer output)
     hidden_states: torch.Tensor,  # [num_tokens, K] fp8
@@ -543,4 +555,5 @@ CUSTOM_BASELINE_FNS: dict[str, Callable] = {
     "block_scaled_mm": _block_scaled_mm,
     "fused_moe_block_mm": _moe_block_mm,
     "mega_moe_block_mm": triton_moe_block_mm,
+    "moe_sum": _moe_sum,
 }
