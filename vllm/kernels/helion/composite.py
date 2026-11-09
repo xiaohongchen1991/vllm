@@ -105,20 +105,40 @@ def _resolved_stage_pins(section: Mapping[str, Any]) -> dict[str, Any]:
 PIN = "pin"
 FREE = "free"
 
+# Settings the composite's stage driver owns; a stage's autotune kwargs may
+# not override them.
+_COMPOSITE_MANAGED_AUTOTUNE_KEYS = frozenset(
+    {
+        "autotune_config_overrides",
+        "autotune_ignore_errors",
+        "autotune_precompile",
+        "autotune_seed_configs",
+    }
+)
 
-def _parse_stage(stage: Sequence[Any]) -> tuple[str, tuple[str, ...]]:
-    """``(action, *selectors)`` -> ``(action, selectors)``."""
+
+def _parse_stage(
+    stage: Sequence[Any],
+) -> tuple[str, tuple[str, ...], dict[str, Any]]:
+    """``(action, *selectors[, autotune_kwargs])`` -> parsed stage."""
+    stage = tuple(stage)
     if not stage or not isinstance(stage[0], str):
         raise ValueError(
-            f"A stage is (action, *selectors), got {tuple(stage)!r}; "
+            f"A stage is (action, *selectors[, autotune_kwargs]), got {stage!r}; "
             f"actions are {PIN!r} and {FREE!r}."
         )
-    action, selectors = stage[0], tuple(stage[1:])
+    action = stage[0]
     if action not in (PIN, FREE):
         raise ValueError(f"Unknown stage action {action!r}; use {PIN!r} or {FREE!r}.")
+    body = stage[1:]
+    autotune_kwargs: dict[str, Any] = {}
+    if body and isinstance(body[-1], Mapping):
+        autotune_kwargs = dict(body[-1])
+        body = body[:-1]
+    selectors = tuple(body)
     if not selectors:
-        raise ValueError(f"Stage {tuple(stage)!r} names no tunables.")
-    return action, selectors
+        raise ValueError(f"Stage {stage!r} names no tunables.")
+    return action, selectors, autotune_kwargs
 
 
 class CompositeStagePlan:
@@ -140,7 +160,24 @@ class CompositeStagePlan:
 
     The stages run in order, each a full autotune pass, and the run ends with
     an implied final stage that frees only ``_STAGE_PINS`` for every site with
-    everything else pinned at the last winner.
+    everything else pinned at the last winner. Pass ``final_stage=False`` to
+    drop that implied stage and fold its codegen-shape keys into the last
+    declared stage instead.
+
+    A stage may carry an optional trailing mapping of autotune overrides::
+
+        (
+            FREE,
+            "root",
+            "moe_block_mm.0",
+            {"autotune_effort": "quick", "initial_population": 40},
+        )
+
+    Keys are any ``helion.Settings`` field (``autotune_effort``,
+    ``autotune_initial_population_strategy``, ...) or any ``LFBOTreeSearch``
+    constructor parameter (``initial_population``, ``copies``,
+    ``min_improvement_delta``, ...). ``final_stage_kwargs`` does the same for
+    the implied final stage.
 
     Example -- tune the layout against the default structure, then the
     structure and root against that layout::
@@ -155,10 +192,27 @@ class CompositeStagePlan:
     pinned.
     """
 
-    def __init__(self, *stages: Sequence[Any]):
+    def __init__(
+        self,
+        *stages: Sequence[Any],
+        final_stage: bool = True,
+        final_stage_kwargs: Mapping[str, Any] | None = None,
+    ):
+        if not stages and not final_stage:
+            raise ValueError("A plan needs at least one stage when final_stage=False")
+        parsed = tuple(_parse_stage(stage) for stage in stages)
         self.stages: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
-            _parse_stage(stage) for stage in stages
+            (action, selectors) for action, selectors, _ in parsed
         )
+        self.stage_autotune_kwargs: tuple[dict[str, Any], ...] = tuple(
+            kwargs for _, _, kwargs in parsed
+        )
+        self.final_autotune_kwargs: dict[str, Any] = dict(final_stage_kwargs or {})
+        self.final_stage = final_stage
+
+    def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
+        """The per-stage autotune overrides carried by stage ``index``."""
+        return self.stage_autotune_kwargs[index]
 
     def free_groups(self, index: int, groups: Sequence[str]) -> dict[str, bool]:
         """The stage's partition: which of ``groups`` it searches."""
@@ -193,11 +247,18 @@ class CompositeStagePlan:
         return f"{action} {', '.join(selectors)}"
 
     def __repr__(self) -> str:
+        parts = []
+        for (action, selectors), kwargs in zip(
+            self.stages, self.stage_autotune_kwargs, strict=True
+        ):
+            text = f"{action} {', '.join(selectors)}"
+            if kwargs:
+                text += f" {kwargs!r}"
+            parts.append(text)
         return (
             "CompositeStagePlan("
-            + "; ".join(
-                f"{action} {', '.join(selectors)}" for action, selectors in self.stages
-            )
+            + "; ".join(parts)
+            + ("" if self.final_stage else ", final_stage=False")
             + ")"
         )
 
@@ -947,8 +1008,34 @@ class CompositeKernel:
         effort: str,
         overrides: Mapping[str, Any] | None,
         seed: helion.Config | None = None,
+        autotune_kwargs: Mapping[str, Any] | None = None,
     ) -> tuple[helion.Config, float]:
         """One LFBOTreeSearch over the composite with a fixed override set."""
+        stage_kwargs = dict(autotune_kwargs or {})
+        managed = _COMPOSITE_MANAGED_AUTOTUNE_KEYS & stage_kwargs.keys()
+        if managed:
+            raise ValueError(
+                "Composite-managed autotune kwargs cannot be overridden: "
+                f"{sorted(managed)}"
+            )
+        setting_names = {field.name for field in dataclasses.fields(self.settings)}
+        stage_settings = {
+            key: value for key, value in stage_kwargs.items() if key in setting_names
+        }
+        search_overrides = {
+            key: value
+            for key, value in stage_kwargs.items()
+            if key not in setting_names
+        }
+        unknown = set(search_overrides) - set(
+            inspect.signature(LFBOTreeSearch.__init__).parameters
+        )
+        if unknown:
+            raise ValueError(
+                f"Unknown autotune kwarg(s) {sorted(unknown)}: expected a "
+                "helion.Settings field or an LFBOTreeSearch parameter."
+            )
+        effort = stage_settings.pop("autotune_effort", effort)
         settings = dataclasses.replace(
             self.settings,
             autotune_effort=effort,
@@ -959,6 +1046,7 @@ class CompositeKernel:
             autotune_precompile=False,
             autotune_config_overrides=dict(overrides) if overrides else None,
             autotune_seed_configs=seed,
+            **stage_settings,
         )
         # Every case carries these settings: helion's multi-input provider
         # benchmarks each case through its own bound kernel (and would
@@ -976,6 +1064,7 @@ class CompositeKernel:
         kwargs = LFBOTreeSearch.get_kwargs_from_profile(
             get_effort_profile(effort), settings
         )
+        kwargs.update(search_overrides)
         search = LFBOTreeSearch(stage_bound, args, **kwargs)
         best = search.autotune()
         return best, search.best.perf
@@ -1023,12 +1112,17 @@ class CompositeKernel:
         bound: BoundCompositeKernel,
         values: Mapping[str, Any],
         free: Mapping[str, bool],
+        *,
+        free_codegen_pins: bool = False,
     ) -> dict[str, Any]:
         """Freeze every group ``free`` does not mark free at its known values.
 
         A free site keeps only its codegen-shape keys pinned (``_STAGE_PINS``),
         so the stage's compiled-kernel count stays proportional to the primary
         dimensions it explores; a pinned site is frozen over its entire space.
+        With ``free_codegen_pins`` the stage searches ``_STAGE_PINS`` too: a
+        free site keeps its full space and a pinned site is frozen except for
+        those keys, matching the implied final stage.
         """
         overrides: dict[str, Any] = {}
         if not free["root"]:
@@ -1037,11 +1131,20 @@ class CompositeKernel:
             )
         sites = {site.name: site for site in bound.config_spec.sites}
         for name, section in values.get("children", {}).items():
-            overrides.update(
-                self._pin_section(name, _resolved_stage_pins(section))
-                if free.get(name, True)
-                else self._pinned_section(name, section, sites)
-            )
+            if free.get(name, True):
+                if not free_codegen_pins:
+                    overrides.update(
+                        self._pin_section(name, _resolved_stage_pins(section))
+                    )
+                continue
+            complete = self._pinned_section(name, section, sites)
+            if free_codegen_pins:
+                complete = {
+                    key: value
+                    for key, value in complete.items()
+                    if key.rsplit(".", 1)[1] not in _STAGE_PINS
+                }
+            overrides.update(complete)
         return overrides
 
     def _final_overrides(
@@ -1088,9 +1191,11 @@ class CompositeKernel:
         its space contains that winner, so the returned config is never worse
         than the previous stage's under this stage's measurement regime.
 
-        Every stage runs ``autotune_effort``: the effort also sets helion's
-        initial population and whether it is padded with random configs, so
-        one effort for the whole run keeps every stage equally wide.
+        Every stage runs ``autotune_effort`` unless its plan entry (or
+        ``final_stage_kwargs`` for the implied final stage) overrides it. The
+        effort also sets helion's initial population and whether it is padded
+        with random configs, so one effort for the whole run keeps every stage
+        equally wide; per-stage autotune kwargs exist to deviate deliberately.
         """
         arg_sets = normalize_arg_sets(args)
         bounds = [self.bind(arg_set) for arg_set in arg_sets]
@@ -1104,38 +1209,45 @@ class CompositeKernel:
         # them, the stage winner afterwards.
         values = _joint_dict(bound.config_spec.default_config())
         groups = ("root", *bound.config_spec.site_names)
+        total_stages = len(plan.stages) + (1 if plan.final_stage else 0)
         best: helion.Config | None = None
         for index in range(len(plan.stages)):
             free = plan.free_groups(index, groups)
+            fold_final = not plan.final_stage and index == len(plan.stages) - 1
             best, perf = self._autotune_stage(
                 bounds,
                 arg_sets,
                 autotune_effort,
-                self._stage_overrides(bound, values, free),
+                self._stage_overrides(
+                    bound, values, free, free_codegen_pins=fold_final
+                ),
                 seed=best,
+                autotune_kwargs=plan.autotune_kwargs(index),
             )
             logger.info(
                 "Composite '%s': stage %d/%d (%s) best %.4fms",
                 self.name,
                 index + 1,
-                len(plan.stages) + 1,
+                total_stages,
                 plan.describe(index),
                 perf,
             )
             values = _joint_dict(bound.config_spec.normalized_config(best))
 
-        best, perf = self._autotune_stage(
-            bounds,
-            arg_sets,
-            autotune_effort,
-            self._final_overrides(bound, values),
-            seed=best,
-        )
-        logger.info(
-            "Composite '%s': stage %d/%d (final: codegen shape free) best %.4fms",
-            self.name,
-            len(plan.stages) + 1,
-            len(plan.stages) + 1,
-            perf,
-        )
+        if plan.final_stage:
+            best, perf = self._autotune_stage(
+                bounds,
+                arg_sets,
+                autotune_effort,
+                self._final_overrides(bound, values),
+                seed=best,
+                autotune_kwargs=plan.final_autotune_kwargs,
+            )
+            logger.info(
+                "Composite '%s': stage %d/%d (final: codegen shape free) best %.4fms",
+                self.name,
+                total_stages,
+                total_stages,
+                perf,
+            )
         return best

@@ -17,15 +17,19 @@ the ``moe_sum`` combine reduces the weighted rows over top_k, so the composite
 models the complete MoE layer end to end, mirroring ``TritonExperts.apply``
 (and the custom Triton baseline).
 
-``permuted``, ``fuse_moe_sum`` and ``m_block_size`` are root tunables
-(``run.tunable``).
+``maybe_permuted``, ``fuse_moe_sum`` and ``m_block_size`` are root tunables
+(``run.tunable``). While ``num_tokens * top_k / E`` is below
+``_MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE``, ``maybe_permuted`` stays in the
+search space but the effective ``permuted`` flag is False (gather/scatter) --
+configs are exchanged across shapes, so the tunable must not disappear from
+the schema.
 ``m_block_size`` is the alignment block size -- the routed rows of one
 aligned block, shared by ``moe_align_block_size`` and both GEMM sites
 (Triton fused_moe's ``BLOCK_SIZE_M``); its default keeps the
 one-block-per-expert-segment layout of ``next_power_of_two(num_tokens)``.
-``permuted`` selects the expert-major layout instead: the ``moe_route``
-kernel (called through ``run``, so the composite tunes it with everything
-else) produces the aligned layout, the expert-major activation
+``maybe_permuted=True`` (the default) selects the expert-major layout: the
+``moe_route`` kernel (called through ``run``, so the composite tunes it with
+everything else) produces the aligned layout, the expert-major activation
 rows, and ``inv_perm`` from one launch (replacing ``_align_routing`` +
 ``moe_permute``), and both GEMM stages gather
 them through ``inv_perm``. GEMM1 also stores its gate_up output permuted
@@ -126,6 +130,19 @@ logger = init_logger(__name__)
 GROUP_K = 128
 GROUP_N = 128
 
+# Below this many routed slots per global expert (num_tokens * top_k / E) the
+# explicit permutation's activation copy plus its extra route phases cannot
+# repay themselves, so the tunable is ignored and ``permuted`` stays False.
+_MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE = 4
+
+
+class _DefaultTrueBooleanFragment(BooleanFragment):
+    """Boolean tunable whose default is True."""
+
+    def default(self) -> bool:
+        return True
+
+
 # The unfused act+quant stage as a composite child site: the same kernel the
 # registered op wraps, but dispatched through ``run`` so the composite owns its
 # config (and its grid is pruned by the routed-slot count in-kernel).
@@ -182,10 +199,18 @@ _MASKED_ATOMIC_ADD = (
 STAGE_PLAN = CompositeStagePlan(
     # Stage 1: the layout and the quant epilogues are searched against the
     # default structure.
-    (PIN, "root", "moe_block_mm.0", "moe_block_mm.1"),
+    (PIN, "root", "moe_block_mm.0", "moe_block_mm.1", {"polish_rounds": 5}),
     # Stage 2: the structure and root are searched against that layout, with
     # everything not named (the quant epilogues) pinned where stage 1 left it.
-    (FREE, "root", "moe_block_mm.0", "moe_block_mm.1", "moe_route.0"),
+    (
+        FREE,
+        "root",
+        "moe_block_mm.0",
+        "moe_block_mm.1",
+        "moe_route.0",
+        {"initial_population": 30, "autotune_compile_timeout": 20, "polish_rounds": 5},
+    ),
+    final_stage_kwargs={"min_improvement_delta": 0.005, "polish_rounds": 2},
 )
 
 
@@ -1258,13 +1283,22 @@ def mega_moe_block_mm(
     workspace2: torch.Tensor,
     clamp_limit: float | None = None,
 ) -> None:
-    unpermuted = run.tunable("unpermuted", BooleanFragment())
-    # unpermuted = False
     num_tokens = hidden_states.shape[0]
     top_k = topk_ids.shape[1]
     N = w1.shape[1]
     H = w2.shape[1]
     routed = num_tokens * top_k
+
+    # ``maybe_permuted`` selects the expert-major layout. The explicit
+    # permutation pays an activation copy plus extra route phases; below the
+    # threshold it cannot repay them, so the tunable is ignored and the
+    # effective ``permuted`` flag stays False. Keep the tunable registered --
+    # configs are shared across shapes -- and derive the decision.
+    maybe_permuted = run.tunable("maybe_permuted", _DefaultTrueBooleanFragment())
+    permuted = (
+        maybe_permuted
+        and routed >= _MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE * global_num_experts
+    )
 
     align_block_size = run.tunable(
         "align_block_size",
@@ -1308,10 +1342,11 @@ def mega_moe_block_mm(
     # stages then gather through inv_perm (GEMM1 also stores permuted, keeping
     # the intermediate contiguous per expert, while GEMM2 scatters its weighted
     # output to the routed slots' token-order rows, so the combine is always a
-    # contiguous moe_sum). Unpermuted, the same kernel runs without a
-    # permutation source, yielding just the aligned layout. The one shortcut
-    # left is the dense layout at align_block_size == 1 with no expert_map,
-    # where every routed slot is its own block and no routing kernel is needed.
+    # contiguous moe_sum). With ``permuted=False``, the same kernel runs
+    # without a permutation source, yielding just the aligned layout. The one
+    # shortcut left is the dense layout at align_block_size == 1 with no
+    # expert_map, where every routed slot is its own block and no routing
+    # kernel is needed.
     # Either way the count flows to both GEMMs as a device tensor -- their
     # grids stay at the worst-case bound and prune the tail in-kernel, so
     # nothing reads back to the host.
@@ -1337,7 +1372,7 @@ def mega_moe_block_mm(
         route_cache = perm_cache = None
     else:
         big, small = (workspace2, workspace13) if N >= H else (workspace13, workspace2)
-        route_cache = big if not unpermuted else small
+        route_cache = big if permuted else small
         perm_cache = small
     if hidden_states.dtype == current_platform.fp8_dtype():
         assert a1q_scale is not None
@@ -1386,7 +1421,7 @@ def mega_moe_block_mm(
             (routed, intermediate),
             (routed, num_group_i),
         )
-    if unpermuted and align_block_size == 1 and expert_map is None:
+    if not permuted and align_block_size == 1 and expert_map is None:
         # Dense layout: every routed slot is its own block, so the alignment --
         # and its kernel -- is skipped entirely (sorted_token_ids=None selects
         # the GEMMs' naive block assignment) and the count is the routed total.
@@ -1403,7 +1438,7 @@ def mega_moe_block_mm(
         # The child's inputs differ only by the permutation: without a source
         # there is nothing to permute, and leaving ``num_valid`` unset skips a
         # store the routing-only path does not consume.
-        if unpermuted:
+        if not permuted:
             source_aq = source_scale = None
             permuted_aq = permuted_scale = None
         else:
@@ -1437,7 +1472,7 @@ def mega_moe_block_mm(
             num_tokens_post_pad,
             num_valid,
         )
-        if not unpermuted:
+        if permuted:
             aq, aq_scale = permuted_aq, permuted_scale
 
     # GEMM1: gate_up projection, staged in workspace2 like the Triton baseline
@@ -1502,7 +1537,7 @@ def mega_moe_block_mm(
 
         # silu_and_mul + per-block fp8 quant, run as a child site so the
         # composite owns its config. The permuted layout stages its on-rank rows
-        # compactly, so it prunes them with the exact count; the unpermuted
+        # compactly, so it prunes them with the exact count; the gather/scatter
         # layout stages by routed-slot id (scattered), so it masks rows per slot
         # from the routing instead -- the same test ``ops.moe_sum`` applies. Its
         # outputs are the ones allocated up front (workspace2 still holds
@@ -1515,9 +1550,9 @@ def mega_moe_block_mm(
             hq_scale,
             GROUP_K,
             clamp_limit,
-            None if unpermuted else num_valid,
-            topk_ids if unpermuted else None,
-            expert_map if unpermuted else None,
+            num_valid if permuted else None,
+            None if permuted else topk_ids,
+            None if permuted else expert_map,
         )
 
     # GEMM2: down projection over the per-routed-row quantized intermediate.
