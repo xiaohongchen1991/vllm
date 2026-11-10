@@ -161,8 +161,8 @@ class CompositeStagePlan:
     The stages run in order, each a full autotune pass, and the run ends with
     an implied final stage that frees only ``_STAGE_PINS`` for every site with
     everything else pinned at the last winner. Pass ``final_stage=False`` to
-    drop that implied stage and fold its codegen-shape keys into the last
-    declared stage instead.
+    drop that implied stage and fold its codegen-shape keys into every declared
+    stage instead.
 
     A stage may carry an optional trailing mapping of autotune overrides::
 
@@ -1183,7 +1183,9 @@ class CompositeKernel:
         names an action and the tunables it applies to, with every other
         tunable taking the opposite action (see that class), and the run ends
         with an implied stage that frees the codegen-shape keys for every site
-        and freezes everything else at the winner. A kernel without a plan runs
+        and freezes everything else at the winner. A plan with
+        ``final_stage=False`` drops that stage and frees the codegen-shape keys
+        in every declared stage instead. A kernel without a plan runs
         the two-stage schedule, i.e. an empty plan: everything free, then the
         codegen shape free and everything else frozen.
 
@@ -1213,13 +1215,13 @@ class CompositeKernel:
         best: helion.Config | None = None
         for index in range(len(plan.stages)):
             free = plan.free_groups(index, groups)
-            fold_final = not plan.final_stage and index == len(plan.stages) - 1
+            free_codegen_pins = not plan.final_stage
             best, perf = self._autotune_stage(
                 bounds,
                 arg_sets,
                 autotune_effort,
                 self._stage_overrides(
-                    bound, values, free, free_codegen_pins=fold_final
+                    bound, values, free, free_codegen_pins=free_codegen_pins
                 ),
                 seed=best,
                 autotune_kwargs=plan.autotune_kwargs(index),

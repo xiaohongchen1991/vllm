@@ -296,6 +296,20 @@ def moe_silu_and_mul_per_block_quant(
     assert input.stride()[-1] == 1
     assert out.stride()[-1] == 1
 
+    # The three layouts are mutually exclusive: the counted compact layout
+    # (``num_valid``), the gathered routed-slot layout without EP
+    # (``topk_ids`` only; every slot is on-rank), and the gathered layout with
+    # EP (``topk_ids`` + ``expert_map``). ``num_valid`` describes the compact
+    # prefix, where every row below the count is on-rank, so combining it with
+    # per-slot masking would mean the two disagree about the layout.
+    assert expert_map is None or topk_ids is not None, (
+        "expert_map is only meaningful with topk_ids (the interleaved layout)"
+    )
+    assert num_valid is None or (topk_ids is None and expert_map is None), (
+        "num_valid describes the compact prefix of the permuted layout; it "
+        "cannot be combined with per-slot topk_ids/expert_map masking"
+    )
+
     quant_dtype = out.dtype
     qtype_traits_min: int | float
     qtype_traits_max: int | float
@@ -320,8 +334,9 @@ def moe_silu_and_mul_per_block_quant(
         # Rows past the on-rank slot count hold no data and keep whatever they
         # held (the composite stages this buffer, so rows no GEMM reads must not
         # be written). Without a count every staged row is a candidate: the
-        # bound becomes the row extent itself, and off-rank rows -- which the
-        # routed-slot layout interleaves -- are masked per slot below instead.
+        # bound becomes the row extent itself. Off-rank rows exist only in the
+        # interleaved routed-slot layout with EP (topk_ids + expert_map), which
+        # masks them per slot below; the compact counted layout has none.
         # The count is loaded here, inside the loop, where a scalar subscript
         # lowers to a load (a host-side tensor value cannot be used directly).
         if num_valid is None:  # noqa: SIM108 - helion traces both ternary arms
@@ -329,17 +344,22 @@ def moe_silu_and_mul_per_block_quant(
         else:
             ntp = num_valid[0]
         if tile_m.begin < ntp:
-            if topk_ids is not None:
-                # Validity per slot, as ``ops.moe_sum`` decides it: here the row
-                # is a routed slot, so it is on-rank iff its expert maps here.
+            if topk_ids is not None and expert_map is not None and num_valid is None:
+                # Interleaved routed-slot layout with EP: validity per slot, as
+                # ``ops.moe_sum`` decides it -- the row is a routed slot, so it
+                # is on-rank iff its expert maps here. ``num_valid is None`` is
+                # asserted above for every per-slot call: the counted compact
+                # layout never needs this mask.
                 e = hl.load(flat_topk, [tile_m])
                 row_mask = e >= 0
-                if expert_map is not None:
-                    mapped = hl.load(expert_map, [e], extra_mask=row_mask)
-                    row_mask = row_mask & (mapped >= 0)
+                mapped = hl.load(expert_map, [e], extra_mask=row_mask)
+                row_mask = row_mask & (mapped >= 0)
             else:
                 # Counted layout: the prefix guard above is the whole test (a
-                # constant-true mask keeps one shape for the masks below).
+                # constant-true mask keeps one shape for the masks below). This
+                # covers the compact permuted layout (num_valid set) and the
+                # gathered layout without EP (expert_map is None: every slot is
+                # on-rank, so no per-slot masking is needed).
                 row_mask = tile_m.index >= 0
             col_mask = (tile_gn.index + groups_per_row < 2 * groups_per_row)[
                 None, :, None

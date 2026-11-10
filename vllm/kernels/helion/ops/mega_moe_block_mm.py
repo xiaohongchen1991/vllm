@@ -208,7 +208,7 @@ STAGE_PLAN = CompositeStagePlan(
         "moe_block_mm.0",
         "moe_block_mm.1",
         "moe_route.0",
-        {"initial_population": 30, "autotune_compile_timeout": 20, "polish_rounds": 5},
+        {"initial_population": 30},
     ),
     final_stage_kwargs={"min_improvement_delta": 0.005, "polish_rounds": 2},
 )

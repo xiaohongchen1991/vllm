@@ -9,11 +9,13 @@ Reduces a fused MoE layer's per-expert outputs over the routing axis::
 When both ``topk_ids`` and ``expert_map`` are given, a lane this rank does not
 compute contributes nothing -- its expert id is negative, or ``expert_map``
 maps it to -1 -- which matches the ``torch.ops._moe_C.moe_sum`` pad-aware path.
-With either missing the reduction is plain: ``topk_ids`` on its own is ignored,
-where the C++ op would still drop its negative lanes. Callers pass the two
-together or (EP=1) pass neither, and a single rank's ids are never off-rank, so
-the two agree on every call production makes. The reduction runs in float32 and
-is cast back to the output dtype.
+With both missing, or with ``topk_ids`` alone, the reduction is plain:
+``topk_ids`` on its own is ignored, where the C++ op would still drop its
+negative lanes. ``expert_map`` without ``topk_ids`` is meaningless -- there is
+no slot to index -- and is rejected. Callers pass the two together or (EP=1)
+pass neither, and a single rank's ids are never off-rank, so the two agree on
+every call production makes. The reduction runs in float32 and is cast back to
+the output dtype.
 """
 
 from __future__ import annotations
@@ -195,6 +197,9 @@ def moe_sum(
     hl.specialize(hidden_size)
     assert output.shape == (num_tokens, hidden_size)
     assert output.is_contiguous()
+    assert expert_map is None or topk_ids is not None, (
+        "expert_map is only meaningful with topk_ids (the interleaved layout)"
+    )
 
     for tile_m, tile_n in hl.tile([num_tokens, hidden_size]):
         acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
