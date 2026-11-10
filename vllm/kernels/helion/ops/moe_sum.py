@@ -185,6 +185,7 @@ def baseline(
     helion_settings=helion.Settings(
         fast_math=True,
         autotune_baseline_fn=baseline,
+        ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
 )  # type: ignore[misc]
 def moe_sum(

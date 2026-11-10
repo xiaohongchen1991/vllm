@@ -369,9 +369,12 @@ def baseline(
     routed = num_tokens * top_k
 
     e = topk_ids.reshape(-1).to(torch.int64)
-    if expert_map is not None:
-        e = expert_map[e].to(torch.int64)
     valid = e >= 0
+    if expert_map is not None:
+        # The dispatched layouts hand over -1 for slots this rank does not
+        # own, so the map is gathered only where the id is valid.
+        e = expert_map[e.clamp(min=0)].to(torch.int64)
+        valid = valid & (e >= 0)
     # Off-rank slots key to a trash bin past the last expert, so they sort to
     # the end and never disturb the valid experts' offsets.
     keyed = torch.where(valid, e, torch.full_like(e, num_experts))
@@ -639,12 +642,16 @@ def moe_route(
     # where it is actually consumed (the placement pass's tail fill), and blocks
     # past the count are pruned by the consumers, so there is no worst-case fill.
     for tile_m in hl.tile(routed):
-        e = hl.load(topk_flat, [tile_m], extra_mask=tile_m.index < routed)
+        in_bounds = tile_m.index < routed
+        e = hl.load(topk_flat, [tile_m], extra_mask=in_bounds)
+        # -1 marks a slot this rank does not own (the dispatched layouts pass
+        # it through), so the map is gathered only where the id is valid.
+        valid = in_bounds & (e >= 0)
         if expert_map is not None:
-            e = expert_map[e].to(torch.int32)
-        e = torch.where(tile_m.index < routed, e, -1)
+            e = hl.load(expert_map, [e], extra_mask=valid).to(torch.int32)
+            valid = valid & (e >= 0)
+        e = torch.where(valid, e, -1)
 
-        valid = e >= 0
         rank = hl.atomic_add(counts_buf, [torch.where(valid, e, num_experts)], 1)
         hl.store(ranks_buf, [tile_m], rank, extra_mask=valid)
 
@@ -697,11 +704,13 @@ def moe_route(
     for tile_r in hl.tile(routed):
         # Cleared like the census above: a padded lane would otherwise read
         # expert 0's offsets and scatter its out-of-range slot id.
+        in_bounds = tile_r.index < routed
         e = topk_flat[tile_r]
+        valid = in_bounds & (e >= 0)
         if expert_map is not None:
-            e = expert_map[e].to(torch.int32)
-        e = torch.where(tile_r.index < routed, e, -1)
-        valid = e >= 0
+            e = hl.load(expert_map, [e], extra_mask=valid).to(torch.int32)
+            valid = valid & (e >= 0)
+        e = torch.where(valid, e, -1)
 
         # The rank pass 1 claimed. Skipped lanes read an undefined value and
         # their -1 expert is never dereferenced (every access below is masked),
