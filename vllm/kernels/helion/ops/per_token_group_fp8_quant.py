@@ -195,6 +195,10 @@ def per_token_group_fp8_quant(
 
     input = input.view(num_tokens, -1, group_size)
     output_q = output_q.view(num_tokens, -1, group_size)
+
+    hl.pdl_wait()
+    hl.pdl_launch_dependents()
+
     for tile_m, tile_gn, tile_n in hl.tile(
         [num_tokens, groups_per_row, group_size], block_size=[None, None, group_size]
     ):

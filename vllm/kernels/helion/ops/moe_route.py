@@ -626,6 +626,9 @@ def moe_route(
     assert max_padded >= routed
     assert num_blocks >= (max_padded + m_block_size - 1) // m_block_size
 
+    hl.pdl_wait()
+    hl.pdl_launch_dependents()
+
     for tile_e in hl.tile(num_experts):
         counts_buf[tile_e] = hl.zeros([tile_e], dtype=counts_buf.dtype)
 

@@ -421,6 +421,8 @@ def moe_block_mm(
     m_block_size = hl.register_block_size(align_block_size)
     n_block_size = hl.register_block_size(min_n_block_size, adjusted_N)
 
+    hl.pdl_wait()
+
     for tile_e, tile_m, tile_n, outer_k in hl.tile(
         [num_blocks, align_block_size, adjusted_N, K],
         block_size=[1, m_block_size, n_block_size, k_block_size],
@@ -640,6 +642,11 @@ def moe_block_mm(
                     hl.zeros([tile_m, tile_n], out_dtype),
                     extra_mask=token_mask[:, None],
                 )
+
+    # Exit release: the next kernel may be scheduled as this grid's warps
+    # finish. PDL ops must be bare top-level statements, and this kernel serves
+    # both GEMM sites, so the release cannot be conditional on the site.
+    hl.pdl_launch_dependents()
 
 
 def _align_routing(
@@ -1536,13 +1543,17 @@ def mega_moe_block_mm(
         )
 
         # silu_and_mul + per-block fp8 quant, run as a child site so the
-        # composite owns its config. The permuted layout stages its on-rank rows
-        # compactly, so it prunes them with the exact count; the gather/scatter
-        # layout stages by routed-slot id (scattered), so it masks rows per slot
-        # from the routing instead -- the same test ``ops.moe_sum`` applies. Its
-        # outputs are the ones allocated up front (workspace2 still holds
-        # gate_up and workspace13 stages GEMM2's output, so neither can host
-        # them).
+        # composite owns its config. Routing arguments are needed only under EP:
+        # the permuted layout stages its on-rank rows compactly, so the exact
+        # count prunes them, while the gather/scatter layout stages by
+        # routed-slot id (scattered), so it masks rows per slot from the
+        # routing instead -- the same test ``ops.moe_sum`` applies. Without EP
+        # every routed slot is on-rank in either layout, so every staged row is
+        # valid and the count equals the row extent. Its outputs are the ones
+        # allocated up front (workspace2 still holds gate_up and workspace13
+        # stages GEMM2's output, so neither can host them).
+        masked = expert_map is not None and not permuted
+        counted = expert_map is not None and permuted
         run(
             _ACT_QUANT_CHILD,
             hq,
@@ -1550,9 +1561,9 @@ def mega_moe_block_mm(
             hq_scale,
             GROUP_K,
             clamp_limit,
-            num_valid if permuted else None,
-            None if permuted else topk_ids,
-            None if permuted else expert_map,
+            num_valid if counted else None,
+            topk_ids if masked else None,
+            expert_map if masked else None,
         )
 
     # GEMM2: down projection over the per-routed-row quantized intermediate.

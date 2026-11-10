@@ -328,6 +328,9 @@ def moe_silu_and_mul_per_block_quant(
     if topk_ids is not None:
         flat_topk = topk_ids.reshape(-1)
 
+    hl.pdl_wait()
+    hl.pdl_launch_dependents()
+
     for tile_m, tile_gn, tile_n in hl.tile(
         [num_tokens, groups_per_row, group_size], block_size=[None, None, group_size]
     ):

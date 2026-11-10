@@ -201,6 +201,8 @@ def moe_sum(
         "expert_map is only meaningful with topk_ids (the interleaved layout)"
     )
 
+    hl.pdl_wait()
+
     for tile_m, tile_n in hl.tile([num_tokens, hidden_size]):
         acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
         for tile_k in hl.tile(top_k):
@@ -224,3 +226,5 @@ def moe_sum(
             acc += vals.to(torch.float32).sum(dim=1)
 
         hl.store(output, [tile_m, tile_n], acc.to(output.dtype))
+
+    hl.pdl_launch_dependents()
