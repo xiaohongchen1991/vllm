@@ -449,8 +449,8 @@ def _fi_ep_params(
     )
     if not contiguous:
         raise NotImplementedError(
-            "flashinfer_moe_block_mm needs this rank's experts to form the "
-            f"contiguous block [r * {local_num_experts}, "
+            "The FlashInfer/TRT-LLM block-scale MoE baselines need this rank's "
+            f"experts to form the contiguous block [r * {local_num_experts}, "
             f"(r + 1) * {local_num_experts}); this expert_map does not."
         )
     return global_num_experts // local_num_experts, start // local_num_experts
@@ -546,10 +546,200 @@ def flashinfer_moe_block_mm(
     )
 
 
+class _TrtllmState(NamedTuple):
+    """Load-time state of the TRT-LLM FP8 block-scale experts.
+
+    ``prepare_fp8_moe_layer_for_fi(is_trtllm=True)`` swaps the gate/up halves
+    (W31) and shuffles both weights into the BlockMajorK layout once at load
+    time; ``ep_rank`` and the per-expert clamp tensor are init-time state. None
+    of it depends on the request, so the baseline caches it the same way.
+    """
+
+    w13: torch.Tensor
+    w13_scale: torch.Tensor
+    w2: torch.Tensor
+    clamp_limit: torch.Tensor | None
+    ep_size: int
+    ep_rank: int
+
+
+_TRTLLM_CACHE: dict[int, tuple[weakref.ref, tuple[object, ...], _TrtllmState]] = {}
+
+
+def _trtllm_state(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    expert_map: torch.Tensor | None,
+    global_num_experts: int,
+    clamp_limit: float | None,
+) -> _TrtllmState:
+    """Load-time and init-time state of the TRT-LLM FP8 block-scale experts."""
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        _shuffle_deepseek_fp8_moe_weights,
+        swap_w13_to_w31,
+    )
+
+    key = (
+        id(w2),
+        id(w1_scale),
+        id(w2_scale),
+        id(expert_map),
+        global_num_experts,
+        clamp_limit,
+    )
+    cache_id = id(w1)
+    entry = _TRTLLM_CACHE.get(cache_id)
+    if entry is not None and entry[1] == key and entry[0]() is w1:
+        return entry[2]
+
+    local_num_experts = w1.shape[0]
+    ep_size, ep_rank = _fi_ep_params(expert_map, local_num_experts, global_num_experts)
+    w13, w2_shuffled = _shuffle_deepseek_fp8_moe_weights(swap_w13_to_w31(w1), w2)
+    state = _TrtllmState(
+        w13=w13,
+        # vLLM stores the gate_up block scales gate-first; the kernel reads them
+        # in the same W31 order as the weights.
+        w13_scale=swap_w13_to_w31(w1_scale),
+        w2=w2_shuffled,
+        clamp_limit=(
+            None
+            if clamp_limit is None
+            else torch.full(
+                (local_num_experts,),
+                float(clamp_limit),
+                dtype=torch.float32,
+                device=w1.device,
+            )
+        ),
+        ep_size=ep_size,
+        ep_rank=ep_rank,
+    )
+    _TRTLLM_CACHE[cache_id] = (
+        weakref.ref(w1, lambda _, entry_id=cache_id: _TRTLLM_CACHE.pop(entry_id, None)),
+        key,
+        state,
+    )
+    return state
+
+
+def trtllm_moe_block_mm(
+    output: torch.Tensor,  # [num_tokens, H] bf16 (reduced layer output)
+    hidden_states: torch.Tensor,  # [num_tokens, K] fp8
+    w1: torch.Tensor,  # [E, N, K] fp8 (gate_up, N = 2 * intermediate)
+    w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
+    w1_scale: torch.Tensor,  # [E, N // 128, K // 128] f32
+    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128] f32
+    a1q_scale: torch.Tensor,  # [num_tokens, K // 128] f32 (not None)
+    topk_weights: torch.Tensor,  # [num_tokens, top_k] f32
+    topk_ids: torch.Tensor,  # [num_tokens, top_k] int32
+    expert_map: torch.Tensor | None,  # [global_num_experts] or None
+    global_num_experts: int,
+    workspace13: torch.Tensor,  # unused (the TRT-LLM kernel fuses the layer)
+    workspace2: torch.Tensor,  # unused
+    clamp_limit: float | None = None,  # swiglu_limit of the gated activation
+) -> None:
+    """TRT-LLM Gen FP8 block-scale baseline for ``mega_moe_block_mm``.
+
+    Mirrors ``TrtLlmFp8ExpertsMonolithic._apply_block_scale``'s block-scale
+    call: DeepSeek FP8 block quantization, BlockMajorK shuffled weights, the
+    activation scales transposed to ``[K // 128, M]``, the rank's contiguous
+    expert block given through ``local_expert_offset``, and the SwiGLU clamp as
+    a per-expert tensor. The one difference is the entry point: this baseline
+    calls ``trtllm_fp8_block_scale_routed_moe`` (the same TRT-LLM Gen kernel
+    driven by ``TrtLlmFp8ExpertsModular.apply``) instead of the logits variant,
+    because the Helion interface carries already-routed ``topk_ids``/
+    ``topk_weights`` and the monolithic kernel would re-derive routing from
+    router logits the case does not have.
+
+    Requires the fp8 input mode (``fp8_input = True`` in the input generator):
+    the TRT-LLM experts take precomputed activation scales and never quantize
+    the activation themselves. SM100 (Blackwell) only -- FlashInfer builds its
+    TRT-LLM Gen MoE module for that family, and vLLM gates the backend on it --
+    so on Hopper this raises instead of falling back; use
+    ``flashinfer_moe_block_mm`` (CUTLASS) there. The W31 swap, the BlockMajorK
+    shuffle and the clamp tensor are load-time work and are cached across
+    calls; only the top-k packing and the scale transpose are per call, as in
+    ``TrtLlmFp8ExpertsModular.apply``.
+    """
+    from vllm.platforms import current_platform
+
+    if (
+        not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+    ):
+        raise NotImplementedError(
+            "FlashInfer's TRT-LLM Gen FP8 block-scale MoE is Blackwell (SM100 "
+            f"family) only; got {current_platform.get_device_name()}. On Hopper "
+            "benchmark against the FlashInfer CUTLASS baseline "
+            "(flashinfer_moe_block_mm) instead."
+        )
+    try:
+        from flashinfer.fused_moe import (
+            Fp8QuantizationType,
+            WeightLayout,
+            trtllm_fp8_block_scale_routed_moe,
+        )
+
+        from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+
+        available = has_flashinfer_trtllm_fused_moe()
+    except Exception as exc:  # noqa: BLE001 - flashinfer may fail to import
+        raise NotImplementedError(f"FlashInfer unavailable: {exc}") from exc
+    if not available:
+        raise NotImplementedError("flashinfer's TRT-LLM Gen MoE is unavailable.")
+
+    if hidden_states.dtype != current_platform.fp8_dtype() or a1q_scale is None:
+        raise NotImplementedError(
+            "The TRT-LLM FP8 block-scale baseline requires the fp8 input mode "
+            f"(fp8_input = True), got {hidden_states.dtype} activations."
+        )
+
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+        prepare_deepseek_fp8_x_sf,
+    )
+    from vllm.model_executor.layers.fused_moe.utils import (
+        trtllm_moe_pack_topk_ids_weights,
+    )
+
+    state = _trtllm_state(
+        w1, w2, w1_scale, w2_scale, expert_map, global_num_experts, clamp_limit
+    )
+    local_num_experts = w1.shape[0]
+
+    trtllm_fp8_block_scale_routed_moe(
+        topk_ids=trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights),
+        routing_bias=None,
+        hidden_states=hidden_states,
+        hidden_states_scale=prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale),
+        gemm1_weights=state.w13,
+        gemm1_weights_scale=state.w13_scale,
+        gemm2_weights=state.w2,
+        gemm2_weights_scale=w2_scale,
+        num_experts=global_num_experts,
+        top_k=topk_ids.shape[1],
+        n_group=None,
+        topk_group=None,
+        intermediate_size=w1.shape[1] // 2,
+        local_expert_offset=state.ep_rank * local_num_experts,
+        local_num_experts=local_num_experts,
+        routed_scaling_factor=None,
+        # The pre-routed entry ignores the routing method (the modular experts
+        # pass the same placeholder).
+        routing_method_type=1,
+        use_shuffled_weight=True,
+        weight_layout=WeightLayout.BlockMajorK,
+        fp8_quantization_type=Fp8QuantizationType.DeepSeekFp8,
+        gemm1_clamp_limit=state.clamp_limit,
+        output=output,
+    )
+
+
 # Maps a baseline name to a hand-written reference used as the ``custom``
 # baseline. Entries keyed by a kernel name are that kernel's default custom
 # baseline; the others are selected explicitly (e.g.
-# ``--baseline flashinfer_moe_block_mm``). Each function shares the kernel's
+# ``--baseline trtllm_moe_block_mm``). Each function shares the kernel's
 # argument interface, so the kernel's input tuple is forwarded verbatim.
 CUSTOM_BASELINE_FNS: dict[str, Callable] = {
     "block_scaled_mm": _block_scaled_mm,
