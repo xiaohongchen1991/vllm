@@ -328,7 +328,6 @@ def moe_silu_and_mul_per_block_quant(
     if topk_ids is not None:
         flat_topk = topk_ids.reshape(-1)
 
-    hl.pdl_wait()
     hl.pdl_launch_dependents()
 
     for tile_m, tile_gn, tile_n in hl.tile(
@@ -367,6 +366,11 @@ def moe_silu_and_mul_per_block_quant(
             col_mask = (tile_gn.index + groups_per_row < 2 * groups_per_row)[
                 None, :, None
             ]
+            # The grid-dependency wait is inlined right before the input load:
+            # the routing tensors (``num_valid``, ``topk_ids``, ``expert_map``)
+            # come from the routing stage, not from the immediately preceding
+            # one, so the masks above are safe to compute before waiting.
+            hl.inline_triton("tl.extra.cuda.gdc_wait()", args=(), output_like=None)
             x_a_blk = hl.load(
                 input,
                 [tile_m, tile_gn, tile_n],

@@ -3,73 +3,73 @@
 """Composite block-scaled MoE layer: one grouped GEMM run twice, with silu+quant
 and the routed-weight combine between.
 
-``moe_block_mm`` (below) is a generic routed grouped GEMM (fp8 activations
+`moe_block_mm` (below) is a generic routed grouped GEMM (fp8 activations
 with per-128-group scales, 128x128 block-scaled weights, bf16 output), so the
-composite runs it twice -- once as the gate_up projection (``w1``,
+composite runs it twice -- once as the gate_up projection (`w1`,
 per-token activations gathered in-kernel) and once as the down projection
-(``w2``, per-routed-row activations) -- with the production
-``ops.silu_and_mul_per_block_quant`` in between operating on the full
-[routed, 2 * intermediate] rows. Every call passes the real model ``top_k``;
-the GEMM derives each stage's activation layout from ``aq.shape[0]``. The down
-projection scales each output row by its routed slot's ``topk_weights``
-coefficient in its epilogue (Triton's ``mul_routed_weight``), and
-the ``moe_sum`` combine reduces the weighted rows over top_k, so the composite
-models the complete MoE layer end to end, mirroring ``TritonExperts.apply``
+(`w2`, per-routed-row activations) -- with the production
+`ops.silu_and_mul_per_block_quant` in between operating on the full
+[routed, 2 * intermediate] rows. Every call passes the real model `top_k`;
+the GEMM derives each stage's activation layout from `aq.shape[0]`. The down
+projection scales each output row by its routed slot's `topk_weights`
+coefficient in its epilogue (Triton's `mul_routed_weight`), and
+the `moe_sum` combine reduces the weighted rows over top_k, so the composite
+models the complete MoE layer end to end, mirroring `TritonExperts.apply`
 (and the custom Triton baseline).
 
-``maybe_permuted``, ``fuse_moe_sum`` and ``m_block_size`` are root tunables
-(``run.tunable``). While ``num_tokens * top_k / E`` is below
-``_MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE``, ``maybe_permuted`` stays in the
-search space but the effective ``permuted`` flag is False (gather/scatter) --
+`maybe_permuted`, `fuse_moe_sum` and `m_block_size` are root tunables
+(`run.tunable`). While `num_tokens * top_k / E` is below
+`_MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE`, `maybe_permuted` stays in the
+search space but the effective `permuted` flag is False (gather/scatter) --
 configs are exchanged across shapes, so the tunable must not disappear from
 the schema.
-``m_block_size`` is the alignment block size -- the routed rows of one
-aligned block, shared by ``moe_align_block_size`` and both GEMM sites
-(Triton fused_moe's ``BLOCK_SIZE_M``); its default keeps the
-one-block-per-expert-segment layout of ``next_power_of_two(num_tokens)``.
-``maybe_permuted=True`` (the default) selects the expert-major layout: the
-``moe_route`` kernel (called through ``run``, so the composite tunes it with
+`m_block_size` is the alignment block size -- the routed rows of one
+aligned block, shared by `moe_align_block_size` and both GEMM sites
+(Triton fused_moe's `BLOCK_SIZE_M`); its default keeps the
+one-block-per-expert-segment layout of `next_power_of_two(num_tokens)`.
+`maybe_permuted=True` (the default) selects the expert-major layout: the
+`moe_route` kernel (called through `run`, so the composite tunes it with
 everything else) produces the aligned layout, the expert-major activation
-rows, and ``inv_perm`` from one launch (replacing ``_align_routing`` +
-``moe_permute``), and both GEMM stages gather
-them through ``inv_perm``. GEMM1 also stores its gate_up output permuted
+rows, and `inv_perm` from one launch (replacing `_align_routing` +
+`moe_permute`), and both GEMM stages gather
+them through `inv_perm`. GEMM1 also stores its gate_up output permuted
 (keeping the intermediate contiguous per expert), while GEMM2 scatters its
 weighted output to the routed slots' token-order rows, so the top-k combine
-is always a contiguous ``moe_sum``. The autotuner explores both
+is always a contiguous `moe_sum`. The autotuner explores both
 layouts per shape and keeps the faster.
-``fuse_moe_sum`` folds that combine into GEMM2's store instead: each
+`fuse_moe_sum` folds that combine into GEMM2's store instead: each
 weighted routed row atomically accumulates into its token's row of the
 [num_tokens, H] layer output (pre-zeroed by the kernel), replacing the
-mm2_out staging cache and the separate ``moe_sum`` launch -- trading a
+mm2_out staging cache and the separate `moe_sum` launch -- trading a
 deterministic reduction for one fewer kernel and no [routed, H] round trip.
 The gate_up projection never combines, so GEMM1 always passes False.
 
-The interface is the fused ``fused_moe_block_mm`` interface plus
-``topk_weights`` (inserted before ``topk_ids``), with the layer-level
+The interface is the fused `fused_moe_block_mm` interface plus
+`topk_weights` (inserted before `topk_ids`), with the layer-level
 [num_tokens, H] output in place of the fused kernel's unreduced
 [num_tokens * top_k, H] one.
 
 Autotuning searches the joint space -- the root tunables plus both GEMM call
-sites' configs (sections ``children.moe_block_mm.0`` / ``.1``) -- with
-helion's own ``LFBOTreeSearch``, measuring every candidate end to end::
+sites' configs (sections `children.moe_block_mm.0` / `.1`) -- with
+helion's own `LFBOTreeSearch`, measuring every candidate end to end::
 
     python scripts/autotune_helion_kernels.py --kernels mega_moe_block_mm
 
 The composite owns the routing and the scratch buffers: it runs the
-``moe_route`` child kernel once at the root-tuned ``m_block_size`` (both GEMMs
-consume that alignment; at ``m_block_size == 1`` with no expert map the dense
+`moe_route` child kernel once at the root-tuned `m_block_size` (both GEMMs
+consume that alignment; at `m_block_size == 1` with no expert map the dense
 layout needs no kernel) and views the preallocated workspace caches for every
 stage buffer instead of allocating: the wider-row cache hosts GEMM1's gate_up
 and then GEMM2's staged output, and the other hosts the routing scratch and
 then the act-quant outputs (each is dead before the next is written). At
-``m_block_size == 1`` the alignment is skipped: every routed slot is its own
-block, so the GEMMs take the dense layout (``sorted_token_ids=None``) and
+`m_block_size == 1` the alignment is skipped: every routed slot is its own
+block, so the GEMMs take the dense layout (`sorted_token_ids=None`) and
 derive slot = block in-kernel (Triton fused_moe's
-``naive_block_assignment``), with ``expert_ids`` the flat ``topk_ids`` view.
+`naive_block_assignment`), with `expert_ids` the flat `topk_ids` view.
 The routing also produces the actual padded routed-slot count
-(``num_tokens_post_padded``, a [1] device tensor from moe_align /
+(`num_tokens_post_padded`, a [1] device tensor from moe_align /
 moe_route / the dense-path synthesis): the align producers -1-fill the
-``expert_ids`` tail beyond it, so the GEMMs' ``e >= 0`` branch skips the
+`expert_ids` tail beyond it, so the GEMMs' `e >= 0` branch skips the
 worst-case tail blocks, and the count gates the off-rank zero-fill to
 blocks whose rows moe_sum actually reads. Everything
 runs on-device with no host sync, so the composite is **CUDA-graph
@@ -220,10 +220,10 @@ def _align_sizes(
     """Worst-case aligned-layout sizes for the compact routing.
 
     Only local experts can receive slots -- off-rank slots get no block -- so
-    the layout pads at most ``min(local_num_experts, numel)`` experts to
-    ``align_block_size`` rows: ``numel * align_block_size`` while there are
-    fewer slots than local experts, and ``numel + local_num_experts *
-    (align_block_size - 1)`` after that.
+    the layout pads at most `min(local_num_experts, numel)` experts to
+    `align_block_size` rows: `numel * align_block_size` while there are
+    fewer slots than local experts, and `numel + local_num_experts *
+    (align_block_size - 1)` after that.
     """
     numel = num_tokens * top_k
     if numel < local_num_experts:
@@ -430,12 +430,27 @@ def moe_block_mm(
     m_block_size = hl.register_block_size(align_block_size)
     n_block_size = hl.register_block_size(min_n_block_size, adjusted_N)
 
-    hl.pdl_wait()
-
+    # Grid-dependency waits are inlined inside the tile loop instead of using
+    # ``hl.pdl_wait`` at entry, because the down projection must issue its
+    # weight tile before waiting while the gate_up projection must wait before
+    # its first read. Both variants therefore need the same kernel and only the
+    # exit release at the end keeps ``launch_pdl`` set.
     for tile_e, tile_m, tile_n, outer_k in hl.tile(
         [num_blocks, align_block_size, adjusted_N, K],
         block_size=[1, m_block_size, n_block_size, k_block_size],
     ):
+        if not apply_weights or not fuse_moe_sum:
+            # Early release: the next stage reads this kernel's output behind
+            # its own grid-dependency wait, so it may be scheduled while this
+            # grid is still waiting on its predecessor. The fused-combine site
+            # has an unknown successor, so it keeps only the exit release.
+            hl.inline_triton(
+                "tl.extra.cuda.gdc_launch_dependents()", args=(), output_like=None
+            )
+        if not apply_weights:
+            # Gate_up: every read below (routing ids, counts, weights and
+            # activations) is produced by the preceding routing stage.
+            hl.inline_triton("tl.extra.cuda.gdc_wait()", args=(), output_like=None)
         blk = tile_e.begin
         ntp = num_tokens_post_padded[0]
 
@@ -490,9 +505,8 @@ def moe_block_mm(
                 # Keep block_size = group_k for the K dimension so the block scale
                 # is constant across each inner tile.
                 for tile_k in hl.tile(outer_k.begin, outer_k.end, block_size=group_k):
-                    aq_blk = hl.load(
-                        aq, [aq_rows, tile_k], extra_mask=token_mask[:, None]
-                    )
+                    # Weight tiles never depend on the producing stage: issue
+                    # them before the down projection's in-loop wait.
                     w_blk = w[e, tile_n, tile_k]
                     if fuse_act_quant:
                         # Up half, adjusted_N columns past the gate half. The
@@ -504,6 +518,16 @@ def moe_block_mm(
                             [e + hl.arange(1), tile_n.index + adjusted_N, tile_k],
                             extra_mask=(tile_n.index + adjusted_N < N)[None, :, None],
                         ).squeeze(0)
+                    if apply_weights:
+                        # Down projection: wait after the weight tile (and after
+                        # the routing reads above) but before the activation, so
+                        # the prefetch overlaps the preceding stage's tail.
+                        hl.inline_triton(
+                            "tl.extra.cuda.gdc_wait()", args=(), output_like=None
+                        )
+                    aq_blk = hl.load(
+                        aq, [aq_rows, tile_k], extra_mask=token_mask[:, None]
+                    )
 
                     if swap_ab:
                         acc_blk = (
@@ -664,19 +688,19 @@ def _align_routing(
     global_num_experts: int,
     block_size: int,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
-    """Align the routing once for both GEMMs at ``block_size``, so each
+    """Align the routing once for both GEMMs at `block_size`, so each
     aligned block holds routed rows of exactly one expert.
 
-    The layout is compact (``ignore_invalid_experts=True``): a slot routed to
+    The layout is compact (`ignore_invalid_experts=True`): a slot routed to
     another rank gets no block, so both GEMMs prune their grids to the blocks
     this rank computes. Those slots' staged rows stay unwritten, which the
-    pad-aware ``ops.moe_sum`` skips at the combine.
+    pad-aware `ops.moe_sum` skips at the combine.
 
     At block_size == 1 (and no expert_map) the alignment is skipped: every
     routed slot is its own block, so the dense layout (sorted_token_ids=None,
     expert = topk_ids[p]) satisfies the stage contract, and the padded count
-    is synthesized like ``_prepare_expert_assignment``'s naive path. The GEMM
-    only reads ``expert_ids[blk]``, so block order does not matter.
+    is synthesized like `_prepare_expert_assignment`'s naive path. The GEMM
+    only reads `expert_ids[blk]`, so block order does not matter.
     """
     if block_size == 1 and expert_map is None:
         return (
@@ -710,13 +734,13 @@ def _simulate_routing(
     """One synthetic routing draw: top_k expert ids and their routed weights.
 
     Gaussian gating logits (i.i.d. across experts, i.e. uniform expected load)
-    pushed through the production router, ``fused_topk``. With ``fixed_seed``
+    pushed through the production router, `fused_topk`. With `fixed_seed`
     the draw is seeded per shape and draw so autotuning is reproducible;
     otherwise it comes from the global RNG. Runs eagerly so it produces
     concrete values under the autotuner's FakeTensorMode.
 
     Ids are in the global expert space; the caller decides which rank the case
-    models (see ``_local_rank_for``).
+    models (see `_local_rank_for`).
     """
     from torch._subclasses.fake_tensor import unset_fake_temporarily
 
@@ -744,7 +768,7 @@ def _local_rank_for(topk_ids: torch.Tensor, num_local_experts: int) -> int:
     small batches most ranks get no slot at all (34% at EP=8, one token), and a
     no-op rank's timing says nothing about any config.
 
-    ``topk_ids`` comes from ``_simulate_routing``'s fake-mode escape, so this
+    `topk_ids` comes from `_simulate_routing`'s fake-mode escape, so this
     runs under the same escape: the ids are concrete tensors even while the
     autotuner traces the input generator under FakeTensorMode.
     """
@@ -1004,8 +1028,8 @@ _pick_cache: dict[tuple[int, int, int, int, int, int, str], CaseKey | None] = {}
 def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | None:
     """Pick the best pre-tuned joint config for the given input shape.
 
-    Configs are matched within the runtime input dtype and ``top_k``. E
-    (global experts), EP, K/N are picked by closest match. ``num_tokens`` is
+    Configs are matched within the runtime input dtype and `top_k`. E
+    (global experts), EP, K/N are picked by closest match. `num_tokens` is
     bucketed to the smallest tuned value >= runtime.
     """
     if not config_keys:
@@ -1090,7 +1114,7 @@ def _silu_mul_block_quant(
     """silu(gate) * up, then per-128-group fp8 quantization of each row.
 
     Without a clamp limit this is the fused CUDA op. With one it takes the two
-    steps ``TritonExperts`` falls back to -- ``swiglu_limit_func`` into bf16,
+    steps `TritonExperts` falls back to -- `swiglu_limit_func` into bf16,
     then the block quantization -- because the fused op has no clamp argument.
     """
     if clamp_limit is None:
@@ -1117,7 +1141,7 @@ def _stage_pair(
     val_shape: tuple[int, ...],
     scale_shape: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Carve an (fp8 values, float32 scales) pair out of ``cache``.
+    """Carve an (fp8 values, float32 scales) pair out of `cache`.
 
     The stage scratch these replace is dead before the next stage writes, so one
     cache covers all of them; a shape whose pair does not fit gets fresh buffers
@@ -1247,7 +1271,7 @@ def baseline(
 
 
 def _baseline_accuracy_check(actual: object, expected: object) -> None:
-    """Accuracy check that compares only ``output``.
+    """Accuracy check that compares only `output`.
 
     The workspace caches hold the bf16 gate_up and weighted GEMM2 scratch (and
     the silu+quant op mints its own outputs), which the reference does not

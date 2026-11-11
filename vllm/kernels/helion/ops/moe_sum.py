@@ -202,8 +202,9 @@ def moe_sum(
         "expert_map is only meaningful with topk_ids (the interleaved layout)"
     )
 
-    hl.pdl_wait()
-
+    # The grid-dependency wait is inlined right before the input load: the
+    # routing tensors are produced by the routing stage, not by the immediately
+    # preceding one, so the mask can be computed before waiting.
     for tile_m, tile_n in hl.tile([num_tokens, hidden_size]):
         acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)
         for tile_k in hl.tile(top_k):
@@ -212,6 +213,9 @@ def moe_sum(
             if topk_ids is None or expert_map is None:
                 # No routing to mask against: EP=1 hands over neither, and a
                 # single rank's ids are never off-rank.
+                hl.inline_triton(
+                    "tl.extra.cuda.gdc_wait()", args=(), output_like=None
+                )
                 vals = input[tile_m, tile_k, tile_n]
             else:
                 # A skipped lane is off-rank: its expert id is negative, or the
@@ -221,6 +225,9 @@ def moe_sum(
                 mask = expert >= 0
                 expert = hl.load(expert_map, [expert], extra_mask=mask)
                 mask = mask & (expert >= 0)
+                hl.inline_triton(
+                    "tl.extra.cuda.gdc_wait()", args=(), output_like=None
+                )
                 vals = hl.load(
                     input, [tile_m, tile_k, tile_n], extra_mask=mask[:, :, None]
                 )

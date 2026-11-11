@@ -12,7 +12,7 @@ tile passes (helion inserts the cross-pass dependencies):
    race the zeroing).
 1. Census each slot's (locally mapped) expert, claiming its within-expert rank
    in the same atomic -- its return value -- and store that rank per slot.
-2. Exclusive per-expert offsets from the census: four programs (``hl.grid(4)``)
+2. Exclusive per-expert offsets from the census: four programs (`hl.grid(4)`)
    each own one output -- the permutation row offsets, the block offsets, the
    padded routed-slot count, and the exact on-rank slot count -- so each
    computes just its own from one census load instead of one program issuing
@@ -21,19 +21,19 @@ tile passes (helion inserts the cross-pass dependencies):
    claimed, scatter to its aligned block position, and sentinel-fill the
    expert's padding tail (the only padding a consumer can read). When the
    permutation source is passed, also compute its expert-major row
-   (row offset + rank), store ``inv_perm``, and copy the token's activation
+   (row offset + rank), store `inv_perm`, and copy the token's activation
    and scale rows through.
 
-The permutation is keyed on ``source_aq`` being non-None (None checks resolve
+The permutation is keyed on `source_aq` being non-None (None checks resolve
 at trace time; booleans do not). Atomic ranks make the within-expert order
 non-deterministic -- any slot -> row bijection is a valid routing, and every
 buffer value is computed by exactly one program, so the maps are correct
 either way.
 
-Interface notes: ``sorted_token_ids`` / ``expert_ids`` are caller-allocated
-with the worst-case ``_align_sizes`` shapes (static per specialization);
-``num_tokens_post_padded`` (optional, [1] int32) receives the padded routed-slot
-count (total blocks x m_block_size) and ``num_valid`` (optional, [1] int32) the
+Interface notes: `sorted_token_ids` / `expert_ids` are caller-allocated
+with the worst-case `_align_sizes` shapes (static per specialization);
+`num_tokens_post_padded` (optional, [1] int32) receives the padded routed-slot
+count (total blocks x m_block_size) and `num_valid` (optional, [1] int32) the
 exact on-rank slot count, so each consumer prunes its worst-case grid in-kernel
 without a D2H sync -- in *its own* row space: the GEMMs iterate aligned blocks,
 whose last block can start past the on-rank slots' row range, while the act-quant
@@ -41,20 +41,20 @@ stage iterates compact rows; the
 census scratch (counts / ranks / row offsets / block offsets) is allocated
 inside the kernel and never escapes it. Off-rank slots (expert_map -> -1)
 never write: their blocks do not exist at all, so no block, slot or padding
-entry is emitted for them and every access is masked. ``num_experts`` is the
-global count and ``num_local_experts`` this rank's share, so the picker can key
+entry is emitted for them and every access is masked. `num_experts` is the
+global count and `num_local_experts` this rank's share, so the picker can key
 its case on
-EP = E / local: ``expert_map``'s gathers are trace-time conditional, so the
+EP = E / local: `expert_map`'s gathers are trace-time conditional, so the
 two EP buckets are different kernels whose per-op config lists differ in
 length.
 
-Each tuned case carries several inputs, one per ``m_block_size`` the mega's
-``align_block_size`` tunable can hand it (the small-batch formula and the token
+Each tuned case carries several inputs, one per `m_block_size` the mega's
+`align_block_size` tunable can hand it (the small-batch formula and the token
 count): the runtime block size pads the layout but is not itself a tuning
 dimension, so one config is tuned across all of them rather than fitted to the
 default. Both values are powers of two, mirroring that tunable's fragment. The
 cases mirror the mega's per-model (E, EP, K) deployments with a linear rank-0
-``expert_map`` under EP.
+`expert_map` under EP.
 """
 
 import math
@@ -115,12 +115,12 @@ def _simulate_topk_ids(num_tokens: int, E: int, top_k: int) -> torch.Tensor:
 
 
 def _m_block_size_candidates(num_tokens: int, top_k: int, E: int) -> list[int]:
-    """The ``m_block_size`` values a case is tuned across.
+    """The `m_block_size` values a case is tuned across.
 
-    Endpoints only. ``m_block_size`` rescales the padded routed-slot count the
-    GEMMs iterate (``num_tokens_post_padded``) without changing the kernel's
+    Endpoints only. `m_block_size` rescales the padded routed-slot count the
+    GEMMs iterate (`num_tokens_post_padded`) without changing the kernel's
     structure, so a config measured at both ends
-    bounds everything the mega's ``align_block_size`` tunable can pick, and an
+    bounds everything the mega's `align_block_size` tunable can pick, and an
     interior point would only interpolate between them at a third of the search
     time. Duplicates collapse; both values are powers of two, like that
     tunable's fragment.
@@ -259,7 +259,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     """Pick the best pre-tuned config: exact (E, K, top_k, EP, permuted)
     preferred, num_tokens bucketed to the smallest tuned value >= runtime.
     m_block_size is not matched -- each case is tuned across the block sizes
-    the mega can pick (see ``_m_block_size_candidates``), and the runtime value
+    the mega can pick (see `_m_block_size_candidates`), and the runtime value
     only pads the layout."""
     if not config_keys:
         return None
@@ -361,7 +361,7 @@ def baseline(
 
     The expert-major slot order is a counting sort -- per-key exclusive offsets
     plus each element's rank within its key -- so the reference compiles under
-    ``torch.compile``: inductor's Triton backend only lowers ``aten.sort`` inside
+    `torch.compile`: inductor's Triton backend only lowers `aten.sort` inside
     a persistent reduction, which a stable argsort is not.
     """
     device = topk_ids.device
