@@ -215,12 +215,21 @@ STAGE_PLAN = CompositeStagePlan(
 
 
 def _align_sizes(
-    num_tokens: int, top_k: int, E: int, align_block_size: int
+    num_tokens: int, top_k: int, local_num_experts: int, align_block_size: int
 ) -> tuple[int, int]:
+    """Worst-case aligned-layout sizes for the compact routing.
+
+    Only local experts can receive slots -- off-rank slots get no block -- so
+    the layout pads at most ``min(local_num_experts, numel)`` experts to
+    ``align_block_size`` rows: ``numel * align_block_size`` while there are
+    fewer slots than local experts, and ``numel + local_num_experts *
+    (align_block_size - 1)`` after that.
+    """
     numel = num_tokens * top_k
-    max_padded = numel + E * (align_block_size - 1)
-    if numel < E:
-        max_padded = min(numel * align_block_size, max_padded)
+    if numel < local_num_experts:
+        max_padded = numel * align_block_size
+    else:
+        max_padded = numel + local_num_experts * (align_block_size - 1)
     num_blocks = (max_padded + align_block_size - 1) // align_block_size
     return max_padded, num_blocks
 
@@ -999,7 +1008,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     (global experts), EP, K/N are picked by closest match. ``num_tokens`` is
     bucketed to the smallest tuned value >= runtime.
     """
-
     if not config_keys:
         return None
 
@@ -1439,8 +1447,10 @@ def mega_moe_block_mm(
         expert_ids = topk_ids.view(-1)
         num_tokens_post_pad = torch.full((1,), routed, dtype=torch.int32, device=device)
     else:
+        # Compact routing: off-rank slots get no block, so the layout pads only
+        # this rank's experts.
         max_padded, num_blocks = _align_sizes(
-            num_tokens, top_k, global_num_experts, align_block_size
+            num_tokens, top_k, w1.shape[0], align_block_size
         )
         sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
         expert_ids = torch.empty(num_blocks, dtype=torch.int32, device=device)

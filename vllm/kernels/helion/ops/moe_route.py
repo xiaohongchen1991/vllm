@@ -261,7 +261,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     m_block_size is not matched -- each case is tuned across the block sizes
     the mega can pick (see ``_m_block_size_candidates``), and the runtime value
     only pads the layout."""
-
     if not config_keys:
         return None
 
@@ -588,6 +587,9 @@ def moe_route(
     # still fine (the arange pads to the next power of two and the tail fill
     # masks the extra lanes).
     assert m_block_size > 0
+    assert expert_map is not None or num_local_experts == num_experts, (
+        "without an expert map every expert is local"
+    )
 
     # Census scratch, allocated fresh per launch: the census accumulates
     # atomically so it starts zeroed, pass 2 fully writes the offsets, and
@@ -598,15 +600,21 @@ def moe_route(
     # scattered by pass 3, and pass 3 also writes the padding tails. Nothing
     # fills the buffer worst-case, so the region past the count is stale memory
     # and must stay unread.
-    # One row past the experts is the census's scratch target for off-rank
-    # slots: ``hl.atomic_add`` has no mask, so masked lanes are redirected to it
-    # instead of being skipped. Keeping the census a helion op (rather than an
-    # inline-Triton masked atomic) is what lets the dependency analysis see that
-    # pass 1 writes this buffer and order the zero-fill below before it.
-    counts_buf = torch.empty(num_experts + 1, dtype=torch.int32, device=topk_ids.device)
+    # Only local experts can receive slots, so the census and the scans cover
+    # the local shard. One row past the local experts is the census's scratch
+    # target for off-rank slots: ``hl.atomic_add`` has no mask, so masked lanes
+    # are redirected to it instead of being skipped. Keeping the census a helion
+    # op (rather than an inline-Triton masked atomic) is what lets the
+    # dependency analysis see that pass 1 writes this buffer and order the
+    # zero-fill below before it.
+    counts_buf = torch.empty(
+        num_local_experts + 1, dtype=torch.int32, device=topk_ids.device
+    )
     ranks_buf = torch.empty(routed, dtype=torch.int32, device=topk_ids.device)
-    offs_buf = torch.empty(num_experts, dtype=torch.int32, device=topk_ids.device)
-    block_offs_buf = torch.empty(num_experts, dtype=torch.int32, device=topk_ids.device)
+    offs_buf = torch.empty(num_local_experts, dtype=torch.int32, device=topk_ids.device)
+    block_offs_buf = torch.empty(
+        num_local_experts, dtype=torch.int32, device=topk_ids.device
+    )
 
     num_group_k = 0
     if source_aq is not None:
@@ -632,15 +640,12 @@ def moe_route(
     hl.pdl_wait()
     hl.pdl_launch_dependents()
 
-    for tile_e in hl.tile(num_experts):
+    for tile_e in hl.tile(num_local_experts):
         counts_buf[tile_e] = hl.zeros([tile_e], dtype=counts_buf.dtype)
 
     # Pass 1: census each slot's (locally mapped) expert, claiming its rank in
     # the same atomic -- its return value is the slot's rank within the expert
     # (the k-th claim on it), and the counter it leaves behind is the census
-    # pass 2 reads. Nothing else is written here: the layout's padding is filled
-    # where it is actually consumed (the placement pass's tail fill), and blocks
-    # past the count are pruned by the consumers, so there is no worst-case fill.
     for tile_m in hl.tile(routed):
         in_bounds = tile_m.index < routed
         e = hl.load(topk_flat, [tile_m], extra_mask=in_bounds)
@@ -650,22 +655,23 @@ def moe_route(
         if expert_map is not None:
             e = hl.load(expert_map, [e], extra_mask=valid).to(torch.int32)
             valid = valid & (e >= 0)
-        e = torch.where(valid, e, -1)
 
-        rank = hl.atomic_add(counts_buf, [torch.where(valid, e, num_experts)], 1)
+        # Off-rank lanes claim the scratch slot past the local experts; their
+        # rank is never stored or read.
+        rank = hl.atomic_add(counts_buf, [torch.where(valid, e, num_local_experts)], 1)
         hl.store(ranks_buf, [tile_m], rank, extra_mask=valid)
 
     # Pass 2: exclusive per-expert offsets from the census, with four programs
     # (``hl.grid(4)``) each owning one output: the permutation row offsets and
     # the block offsets (prefix scans), then the padded routed-slot count and
     # the exact on-rank slot count (totals). Splitting them keeps a program's
-    # work to a single E-wide pass -- the previous forms had one program issue
-    # all four serially, and before that every program re-summed the whole
-    # census, O(E^2) in all.
+    # work to a single local-experts-wide pass -- the previous forms had one
+    # program issue all four serially, and before that every program re-summed
+    # the whole census, O(E^2) in all.
     for i in hl.grid(4):
-        e_all = hl.arange(num_experts)
-        counts = hl.load(counts_buf, [e_all], extra_mask=e_all < num_experts)
-        mask = e_all < num_experts
+        e_all = hl.arange(num_local_experts)
+        counts = hl.load(counts_buf, [e_all], extra_mask=e_all < num_local_experts)
+        mask = e_all < num_local_experts
 
         if i == 0:  # noqa: SIM102 - `and` would truth-test a traced condition
             if source_aq is not None:
@@ -702,15 +708,14 @@ def moe_route(
     # decision was made in the census pass. The slot block is fixed so the
     # row-copy tiles stay small at untuned defaults.
     for tile_r in hl.tile(routed):
-        # Cleared like the census above: a padded lane would otherwise read
-        # expert 0's offsets and scatter its out-of-range slot id.
+        # Every access below carries ``valid``, so a padded or off-rank lane's
+        # stale id is never dereferenced.
         in_bounds = tile_r.index < routed
         e = topk_flat[tile_r]
         valid = in_bounds & (e >= 0)
         if expert_map is not None:
             e = hl.load(expert_map, [e], extra_mask=valid).to(torch.int32)
             valid = valid & (e >= 0)
-        e = torch.where(valid, e, -1)
 
         # The rank pass 1 claimed. Skipped lanes read an undefined value and
         # their -1 expert is never dereferenced (every access below is masked),
@@ -726,24 +731,26 @@ def moe_route(
         )
         hl.store(expert_ids, [blk], e, extra_mask=valid)
 
-        # Sentinel-fill this expert's padding tail: its slots fill the blocks in
-        # rank order, so the only padding a GEMM can read is
-        # [counts[e], blocks_e * m_block_size), the tail of its last block. The
-        # real slots live below counts[e], so the fill never races them, and
-        # every slot of the expert writes the same lanes idempotently. This
-        # replaces the worst-case fill over the whole padded buffer.
-        cnt = hl.load(counts_buf, [e], extra_mask=valid)
-        blocks_e = (cnt + m_block_size - 1) // m_block_size
-        pad = blocks_e * m_block_size - cnt
-        base = hl.load(block_offs_buf, [e], extra_mask=valid) * m_block_size
-        pad_cols = hl.arange(m_block_size)
-        tail = base[:, None] + cnt[:, None] + pad_cols[None, :]
-        hl.store(
-            sorted_token_ids,
-            [tail],
-            (tail * 0 + routed).to(sorted_token_ids.dtype),
-            extra_mask=valid[:, None] & (pad_cols[None, :] < pad[:, None]),
-        )
+        if m_block_size > 1:
+            # Sentinel-fill this expert's padding tail: its slots fill the
+            # blocks in rank order, so the only padding a GEMM can read is
+            # [counts[e], blocks_e * m_block_size), the tail of its last block.
+            # The real slots live below counts[e], so the fill never races them,
+            # and every slot of the expert writes the same lanes idempotently.
+            # This replaces the worst-case fill over the whole padded buffer.
+            # At block size 1 there is no padding, so the tail is skipped.
+            cnt = hl.load(counts_buf, [e], extra_mask=valid)
+            blocks_e = (cnt + m_block_size - 1) // m_block_size
+            pad = blocks_e * m_block_size - cnt
+            base = hl.load(block_offs_buf, [e], extra_mask=valid) * m_block_size
+            pad_cols = hl.arange(m_block_size)
+            tail = base[:, None] + cnt[:, None] + pad_cols[None, :]
+            hl.store(
+                sorted_token_ids,
+                [tail],
+                (tail * 0 + routed).to(sorted_token_ids.dtype),
+                extra_mask=valid[:, None] & (pad_cols[None, :] < pad[:, None]),
+            )
         if source_aq is not None:
             perm_row = hl.load(offs_buf, [e], extra_mask=valid) + rank
 
