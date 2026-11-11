@@ -642,16 +642,18 @@ def trtllm_moe_block_mm(
 ) -> None:
     """TRT-LLM Gen FP8 block-scale baseline for ``mega_moe_block_mm``.
 
-    Mirrors ``TrtLlmFp8ExpertsMonolithic._apply_block_scale``'s block-scale
-    call: DeepSeek FP8 block quantization, BlockMajorK shuffled weights, the
-    activation scales transposed to ``[K // 128, M]``, the rank's contiguous
-    expert block given through ``local_expert_offset``, and the SwiGLU clamp as
-    a per-expert tensor. The one difference is the entry point: this baseline
-    calls ``trtllm_fp8_block_scale_routed_moe`` (the same TRT-LLM Gen kernel
-    driven by ``TrtLlmFp8ExpertsModular.apply``) instead of the logits variant,
-    because the Helion interface carries already-routed ``topk_ids``/
-    ``topk_weights`` and the monolithic kernel would re-derive routing from
-    router logits the case does not have.
+    Follows ``TrtLlmFp8ExpertsModular.apply``: hand the kernel the unpacked
+    ``(topk_ids, topk_weights)`` routing tuple, pass the activation scales
+    through ``prepare_deepseek_fp8_x_sf`` (fp32, ``[K // 128, M]``), and drive
+    ``trtllm_fp8_block_scale_routed_moe`` with DeepSeek FP8 block
+    quantization, BlockMajorK shuffled weights in W31 order, the rank's
+    contiguous expert block through ``local_expert_offset``, and the SwiGLU
+    clamp as a per-expert tensor. Routing happens upstream, as it does for the
+    Helion kernel: the experts align the routed slots and apply the routed
+    weights and the top-k reduction in-kernel (``do_finalize=True``, the
+    non-deferred branch of ``apply``). The monolithic class differs only by
+    deriving the routing from router logits inside the kernel
+    (``_apply_block_scale``), so it is not the counterpart of this interface.
 
     Requires the fp8 input mode (``fp8_input = True`` in the input generator):
     the TRT-LLM experts take precomputed activation scales and never quantize
@@ -659,9 +661,9 @@ def trtllm_moe_block_mm(
     TRT-LLM Gen MoE module for that family, and vLLM gates the backend on it --
     so on Hopper this raises instead of falling back; use
     ``flashinfer_moe_block_mm`` (CUTLASS) there. The W31 swap, the BlockMajorK
-    shuffle and the clamp tensor are load-time work and are cached across
-    calls; only the top-k packing and the scale transpose are per call, as in
-    ``TrtLlmFp8ExpertsModular.apply``.
+    shuffle and the clamp tensor are the load-time work
+    ``process_weights_after_loading`` performs for this backend, cached across
+    calls here; only the scale transpose is per-call work, as in ``apply``.
     """
     from vllm.platforms import current_platform
 
@@ -699,39 +701,42 @@ def trtllm_moe_block_mm(
     from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
         prepare_deepseek_fp8_x_sf,
     )
-    from vllm.model_executor.layers.fused_moe.utils import (
-        trtllm_moe_pack_topk_ids_weights,
-    )
 
     state = _trtllm_state(
         w1, w2, w1_scale, w2_scale, expert_map, global_num_experts, clamp_limit
     )
     local_num_experts = w1.shape[0]
+    hidden_states_scale = prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale)
 
     trtllm_fp8_block_scale_routed_moe(
-        topk_ids=trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights),
+        # Unpacked routing, as the modular experts hand it over.
+        topk_ids=(topk_ids, topk_weights),
         routing_bias=None,
         hidden_states=hidden_states,
-        hidden_states_scale=prepare_deepseek_fp8_x_sf(hidden_states, a1q_scale),
+        hidden_states_scale=hidden_states_scale,
         gemm1_weights=state.w13,
         gemm1_weights_scale=state.w13_scale,
+        # SwiGLU alpha/beta are set only for MXFP8, unused for block FP8.
+        gemm1_alpha=None,
+        gemm1_beta=None,
+        gemm1_clamp_limit=state.clamp_limit,
         gemm2_weights=state.w2,
         gemm2_weights_scale=w2_scale,
         num_experts=global_num_experts,
-        top_k=topk_ids.shape[1],
+        top_k=topk_ids.size(1),
         n_group=None,
         topk_group=None,
         intermediate_size=w1.shape[1] // 2,
         local_expert_offset=state.ep_rank * local_num_experts,
         local_num_experts=local_num_experts,
         routed_scaling_factor=None,
-        # The pre-routed entry ignores the routing method (the modular experts
-        # pass the same placeholder).
+        # The pre-routed entry ignores the routing method (apply passes the
+        # same placeholder).
         routing_method_type=1,
         use_shuffled_weight=True,
         weight_layout=WeightLayout.BlockMajorK,
         fp8_quantization_type=Fp8QuantizationType.DeepSeekFp8,
-        gemm1_clamp_limit=state.clamp_limit,
+        do_finalize=True,
         output=output,
     )
 

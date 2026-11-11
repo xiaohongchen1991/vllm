@@ -839,10 +839,13 @@ def _generate_input(
 
     a1q_scale = None
     if fp8_input:
+        # Row-major [num_tokens, K // GROUP_K], as the modular prepare's
+        # moe_kernel_quantize_input produces it (the column-major
+        # [K // GROUP_K, num_tokens] form is DeepGEMM's internal layout).
         a1q_scale = 0.5 + torch.rand(
-            num_group_k, num_tokens, dtype=scale_dtype, device="cuda"
+            num_tokens, num_group_k, dtype=scale_dtype, device="cuda"
         )
-        a1q_scale = _ceil_to_ue8m0(a1q_scale).t()
+        a1q_scale = _ceil_to_ue8m0(a1q_scale)
 
     # Weight scales: w1 [E, num_group_n, num_group_k], w2 [E, num_group_h,
     # num_group_i].
