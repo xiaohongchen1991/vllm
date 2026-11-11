@@ -31,6 +31,7 @@ from torch._subclasses.fake_tensor import FakeTensorMode
 try:
     import helion
 
+    from vllm.config.logging import LoggingConfig
     from vllm.kernels.helion import (
         ConfigManager,
         get_kernel_by_name,
@@ -42,7 +43,7 @@ try:
         get_config_gpu_name,
         get_gpu_name,
     )
-    from vllm.logger import init_logger
+    from vllm.logger import configure_logging, init_logger
     from vllm.utils.import_utils import has_helion
 except ImportError as e:
     print(f"Error importing vLLM: {e}")
@@ -392,17 +393,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Logging is configured by the runtime entry points since #57205, so a
+    # standalone tool has to apply the default config itself.
+    configure_logging(LoggingConfig(log_level="DEBUG" if args.verbose else "INFO"))
+
     # import all helion kernels
     import_all_kernels()
 
-    import logging
-
     if args.verbose:
-        logging.getLogger("vllm").setLevel(logging.DEBUG)
         logger.debug("Verbose mode enabled")
         logger.debug("Arguments: %s", vars(args))
-    else:
-        logging.getLogger("vllm").setLevel(logging.INFO)
 
     if args.list:
         list_kernels()
