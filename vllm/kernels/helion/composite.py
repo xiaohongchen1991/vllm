@@ -1,36 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Composite Helion kernels: multiple ``@helion.kernel`` children tuned as one.
+"""Composite Helion kernels: multiple `@helion.kernel` children tuned as one.
 
 A composite kernel is defined by a *body* -- a plain function whose first
-parameter is ``run`` followed by the composite's full argument list -- that
-calls child helion kernels through ``run(child, *args)``. ``run`` is the
+parameter is `run` followed by the composite's full argument list -- that
+calls child helion kernels through `run(child, *args)`. `run` is the
 framework's single interception point:
 
-* **Binding** (``CompositeKernel.bind``): the body executes once with root
-  tunables at their defaults; each ``run`` records the call site, binds the
-  child (``child.bind(args)``), and executes it at the child's default config
+* **Binding** (`CompositeKernel.bind`): the body executes once with root
+  tunables at their defaults; each `run` records the call site, binds the
+  child (`child.bind(args)`), and executes it at the child's default config
   so intermediates propagate to later sites. The result is a
-  ``BoundCompositeKernel`` holding the discovered sites.
-* **Configured execution** (``CompositeKernel.configure``): the body executes
+  `BoundCompositeKernel` holding the discovered sites.
+* **Configured execution** (`CompositeKernel.configure`): the body executes
   with each site running its section of a joint config; sites bind lazily per
   actual arguments, so a config may drive the body down branches whose sites
   were never bound (e.g. a root tunable flipping a layout).
 
-Root tunables (``run.tunable(name, fragment)``) are composite-level knobs
+Root tunables (`run.tunable(name, fragment)`) are composite-level knobs
 searched like any other dimension. Boolean root tunables may be structural
 (they may select which child sites execute); the worst case is that the search
 explores a section whose site is skipped under another root value, which is
 harmless.
 
-The joint config is ``{"root": {...}, "children": {"<kernel>.<occurrence>":
-{...}}}`` -- one section per call site, named after the child kernel and its
+The joint config is `{"root": {...}, "children": {"<kernel>.<occurrence>":
+{...}}}` -- one section per call site, named after the child kernel and its
 occurrence index in body execution order (the same kernel may be called
 multiple times with independently tuned configs).
 
-``BoundCompositeKernel`` implements helion's ``_AutotunableKernel`` protocol
-(``config_spec``/``settings``/``env``/``configs``/``compile_config``), so
-helion's own autotuners (e.g. ``LFBOTreeSearch``) can drive the composite as
+`BoundCompositeKernel` implements helion's `_AutotunableKernel` protocol
+(`config_spec`/`settings`/`env`/`configs`/`compile_config`), so
+helion's own autotuners (e.g. `LFBOTreeSearch`) can drive the composite as
 if it were a single kernel: every candidate is a complete joint config
 measured by running the whole body end to end.
 """
@@ -84,18 +84,23 @@ _STAGE_PINS: dict[str, Any] = {
 }
 
 
-def _resolved_stage_pins(section: Mapping[str, Any]) -> dict[str, Any]:
-    """``_STAGE_PINS`` resolved against one site's config section.
+def _resolved_stage_pins(
+    section: Mapping[str, Any], *, follow_section: bool = False
+) -> dict[str, Any]:
+    """`_STAGE_PINS` resolved against one site's config section.
 
-    Only keys the site actually has are returned: ``None`` entries take the
+    Only keys the site actually has are returned: `None` entries take the
     section's value, literals are broadcast to the arity of a list value.
+    `follow_section` keeps the section's own choice for the literal entries
+    too, i.e. it pins a seeded run's indexing and eviction hints to the config
+    it started from rather than to the pointer defaults the search prefers.
     """
     pinned: dict[str, Any] = {}
     for key, value in _STAGE_PINS.items():
         if key not in section:
             continue
         default_value = section[key]
-        resolved = default_value if value is None else value
+        resolved = default_value if value is None or follow_section else value
         if isinstance(default_value, list) and not isinstance(resolved, list):
             resolved = [resolved] * len(default_value)
         pinned[key] = resolved
@@ -120,7 +125,7 @@ _COMPOSITE_MANAGED_AUTOTUNE_KEYS = frozenset(
 def _parse_stage(
     stage: Sequence[Any],
 ) -> tuple[str, tuple[str, ...], dict[str, Any]]:
-    """``(action, *selectors[, autotune_kwargs])`` -> parsed stage."""
+    """`(action, *selectors[, autotune_kwargs])` -> parsed stage."""
     stage = tuple(stage)
     if not stage or not isinstance(stage[0], str):
         raise ValueError(
@@ -144,23 +149,23 @@ def _parse_stage(
 class CompositeStagePlan:
     """Ordered stages that pin or free parts of a composite's search space.
 
-    A selector is ``"root"`` (the root tunables) or a site name
-    (``<child kernel>.<call index>``, in body call order). Each stage states
+    A selector is `"root"` (the root tunables) or a site name
+    (`<child kernel>.<call index>`, in body call order). Each stage states
     one action and the tunables it applies to; every tunable it does not name
     takes the opposite action, so a stage is a complete partition of the space:
 
-    * ``(FREE, ...)`` searches the named tunables and pins the rest.
-    * ``(PIN, ...)`` pins the named tunables and searches the rest.
+    * `(FREE, ...)` searches the named tunables and pins the rest.
+    * `(PIN, ...)` pins the named tunables and searches the rest.
 
     Pinned tunables are frozen at their latest known values -- ConfigSpec
     defaults before the group has been tuned, the stage winner afterwards --
-    and free sites keep their codegen-shape keys (``_STAGE_PINS``) pinned, so a
+    and free sites keep their codegen-shape keys (`_STAGE_PINS`) pinned, so a
     stage's compiled-kernel count stays proportional to the dimensions it
     explores.
 
     The stages run in order, each a full autotune pass, and the run ends with
-    an implied final stage that frees only ``_STAGE_PINS`` for every site with
-    everything else pinned at the last winner. Pass ``final_stage=False`` to
+    an implied final stage that frees only `_STAGE_PINS` for every site with
+    everything else pinned at the last winner. Pass `final_stage=False` to
     drop that implied stage and fold its codegen-shape keys into every declared
     stage instead.
 
@@ -173,10 +178,10 @@ class CompositeStagePlan:
             {"autotune_effort": "quick", "initial_population": 40},
         )
 
-    Keys are any ``helion.Settings`` field (``autotune_effort``,
-    ``autotune_initial_population_strategy``, ...) or any ``LFBOTreeSearch``
-    constructor parameter (``initial_population``, ``copies``,
-    ``min_improvement_delta``, ...). ``final_stage_kwargs`` does the same for
+    Keys are any `helion.Settings` field (`autotune_effort`,
+    `autotune_initial_population_strategy`, ...) or any `LFBOTreeSearch`
+    constructor parameter (`initial_population`, `copies`,
+    `min_improvement_delta`, ...). `final_stage_kwargs` does the same for
     the implied final stage.
 
     Example -- tune the layout against the default structure, then the
@@ -211,11 +216,11 @@ class CompositeStagePlan:
         self.final_stage = final_stage
 
     def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
-        """The per-stage autotune overrides carried by stage ``index``."""
+        """The per-stage autotune overrides carried by stage `index`."""
         return self.stage_autotune_kwargs[index]
 
     def free_groups(self, index: int, groups: Sequence[str]) -> dict[str, bool]:
-        """The stage's partition: which of ``groups`` it searches."""
+        """The stage's partition: which of `groups` it searches."""
         action, selectors = self.stages[index]
         listed = set(selectors)
         free = action == FREE
@@ -269,16 +274,16 @@ class CompositeCompileTimeout(TimeoutError):
 
 @contextlib.contextmanager
 def _compile_deadline(seconds: float | None) -> Iterator[None]:
-    """Abort a candidate whose compile runs past ``seconds``.
+    """Abort a candidate whose compile runs past `seconds`.
 
-    helion enforces ``autotune_compile_timeout`` only in its killable
+    helion enforces `autotune_compile_timeout` only in its killable
     subprocess worker, which a composite cannot use (its runners close over
     lazily bound child kernels). The same deadline is enforced in process with
-    ``SIGALRM``: the search runs with ``autotune_ignore_errors``, so the raised
-    ``CompositeCompileTimeout`` marks the candidate failed and the search moves
+    `SIGALRM`: the search runs with `autotune_ignore_errors`, so the raised
+    `CompositeCompileTimeout` marks the candidate failed and the search moves
     on. Signals reach the main thread only, and a compiler wedged in a
     non-interruptible call cannot be stopped -- this bounds the common case
-    (Python-side codegen, waiting on ``ptxas``), it is not a hard kill.
+    (Python-side codegen, waiting on `ptxas`), it is not a hard kill.
     """
     if not seconds or threading.current_thread() is not threading.main_thread():
         yield
@@ -297,13 +302,13 @@ def _compile_deadline(seconds: float | None) -> Iterator[None]:
 
 
 def is_composite_body(body: Callable) -> bool:
-    """Whether ``body`` defines a composite kernel (first parameter ``run``)."""
+    """Whether `body` defines a composite kernel (first parameter `run`)."""
     params = list(inspect.signature(body).parameters)
     return bool(params) and params[0] == "run"
 
 
 def body_signature(body: Callable) -> inspect.Signature:
-    """The composite's outward signature: the body minus its ``run`` parameter."""
+    """The composite's outward signature: the body minus its `run` parameter."""
     sig = inspect.signature(body)
     params = [p for name, p in sig.parameters.items() if name != "run"]
     # Preserve the return annotation: torch's infer_schema requires one.
@@ -336,7 +341,7 @@ def _cfg_key(section: Any) -> str:
 
 
 def _adapt_section(spec: Any, section: Any) -> helion.Config:
-    """Fit a section proposed under another site's spec to ``spec``.
+    """Fit a section proposed under another site's spec to `spec`.
 
     A section may reach a site that bound lazily under different arguments
     (e.g. a root tunable flipping the body to a layout with one more memory
@@ -363,6 +368,51 @@ def _adapt_section(spec: Any, section: Any) -> helion.Config:
     return spec.normalized_config(helion.Config.from_dict(adapted))
 
 
+def _fit_joint_config(bound: BoundCompositeKernel, config: Any) -> helion.Config:
+    """`config` fitted to this binding: known keys, live sites, defaults filled.
+
+    A pre-tuned config may carry root values or section keys the current body
+    no longer defines (an older schema) and sections for sites this program does
+    not call. Those are dropped rather than pinned into the search, where an
+    unknown override would reach the child's config generation.
+    """
+    spec = bound.config_spec
+    joint = _joint_dict(config)
+    known_root = set(spec.default_config().config["root"])
+    sections = joint.get("children", {})
+    children = {}
+    for site in spec.sites:
+        section = sections.get(site.name)
+        if not isinstance(section, dict):
+            continue
+        space = CompositeKernel._site_space(site)
+        children[site.name] = {
+            key: value for key, value in section.items() if key in space
+        }
+    return spec.normalized_config(
+        {
+            "root": {
+                key: value
+                for key, value in joint.get("root", {}).items()
+                if key in known_root
+            },
+            "children": children,
+        }
+    )
+
+
+def _stage_seeds(
+    seed_config: helion.Config | None, winner: helion.Config | None
+) -> helion.Config | list[helion.Config] | None:
+    """A stage's seed configs: the starting config and the previous winner."""
+    seeds = [config for config in (seed_config, winner) if config is not None]
+    if not seeds:
+        return None
+    if len(seeds) == 1 or seeds[0] == seeds[1]:
+        return seeds[0]
+    return seeds
+
+
 class _Site:
     """One child-kernel call site discovered during binding."""
 
@@ -377,9 +427,9 @@ class _Site:
 
 
 class _BindRun:
-    """Bind-mode ``run``: records sites and propagates at default configs.
+    """Bind-mode `run`: records sites and propagates at default configs.
 
-    Also the root-tunable registration point: ``tunable`` registers the
+    Also the root-tunable registration point: `tunable` registers the
     fragment on the composite (idempotently, for cross-execution type
     checking) and captures it on this bind -- root fragments may be
     shape-dependent (e.g. a block-size range derived from num_tokens), so the
@@ -420,12 +470,12 @@ class _BindRun:
 
 
 class _ConfiguredRun:
-    """Configured-mode ``run``: runs each site on its section of a joint config.
+    """Configured-mode `run`: runs each site on its section of a joint config.
 
     Sites bind lazily per actual arguments (helion caches binds by
     specialization), so the body may follow branches whose sites differ from --
     or were absent in -- the bind pass. Compiled sections are cached on the
-    shared ``compiled_cache`` so repeated body executions reuse them.
+    shared `compiled_cache` so repeated body executions reuse them.
     """
 
     def __init__(
@@ -465,7 +515,7 @@ class _ConfiguredRun:
 
 
 class _CompositeBackendProxy:
-    """Backend facade for ``CompositeConfigSpec``: delegates everything to a
+    """Backend facade for `CompositeConfigSpec`: delegates everything to a
     child backend except config viability, which validates per site section."""
 
     def __init__(self, child_backend: Any, sites: Sequence[_Site]):
@@ -496,7 +546,7 @@ class _CompositeBackendProxy:
 
 class CompositeConfigSpec:
     """Flat search space of a composite: root tunables plus every site's
-    child space, namespaced ``root.<name>`` / ``children.<site>.<name>``."""
+    child space, namespaced `root.<name>` / `children.<site>.<name>`."""
 
     def __init__(
         self, root_fragments: Mapping[str, ConfigSpecFragment], sites: Sequence[_Site]
@@ -612,26 +662,26 @@ class CompositeConfigGeneration(ConfigGeneration):
     """ConfigGeneration over the composite's flat space.
 
     The flat layout is the root fragments followed by each site's own
-    ``ConfigGeneration.flat_spec``. Flatten/unflatten split and join at those
+    `ConfigGeneration.flat_spec`. Flatten/unflatten split and join at those
     fixed boundaries, delegating per site to the child generation, so fragment
     behavior (pattern neighbors, encoding, viability) is inherited from the
     children rather than reimplemented.
 
-    Overrides are addressed by flat-layout name: ``root.<name>`` pins a root
-    tunable and ``children.<site>.<key>`` pins a child tunable. Child overrides
-    layer on top of that child kernel's own ``autotune_config_overrides``
+    Overrides are addressed by flat-layout name: `root.<name>` pins a root
+    tunable and `children.<site>.<key>` pins a child tunable. Child overrides
+    layer on top of that child kernel's own `autotune_config_overrides`
     settings, so an unaddressed site keeps its kernel-level pins (e.g.
-    ``indexing``); the composite uses the explicit form to run each autotune
+    `indexing`); the composite uses the explicit form to run each autotune
     stage with the sites and keys that stage freezes.
     """
 
     def _site_overrides(self, site: _Site) -> dict[str, Any] | None:
         """The site's config overrides, adapted to this site's ConfigSpec.
 
-        Combines the child kernel's own ``autotune_config_overrides`` with any
-        addressed to this site (``children.<site>.<key>``). A kernel-level
+        Combines the child kernel's own `autotune_config_overrides` with any
+        addressed to this site (`children.<site>.<key>`). A kernel-level
         override applies to every call site of that kernel, but
-        structure-length values (``indexing``, eviction policies) are sized per
+        structure-length values (`indexing`, eviction policies) are sized per
         traced program, so sibling sites can need different lengths. Adapt list
         values to this site's own spec (truncate, or pad with the spec's
         defaults) so they encode against that spec's fragments.
@@ -798,10 +848,10 @@ class CompositeConfigGeneration(ConfigGeneration):
 
 
 class BoundCompositeKernel:
-    """A ``CompositeKernel`` bound to concrete args; helion-autotunable.
+    """A `CompositeKernel` bound to concrete args; helion-autotunable.
 
-    Implements the ``_AutotunableKernel`` protocol so helion's autotuners
-    drive the composite as one kernel: ``compile_config(joint)`` returns a
+    Implements the `_AutotunableKernel` protocol so helion's autotuners
+    drive the composite as one kernel: `compile_config(joint)` returns a
     callable running the whole body with that joint config.
     """
 
@@ -873,7 +923,7 @@ class BoundCompositeKernel:
 
     def format_kernel_decorator(self, config: Any, settings: Any) -> str:
         """Placeholder for the search's completion log (single kernels emit the
-        matching ``@helion.kernel(config=...)`` decorator here; a composite's
+        matching `@helion.kernel(config=...)` decorator here; a composite's
         result is the stored joint config, not a kernel decorator)."""
         return f"# composite joint config: {config!r}"
 
@@ -884,7 +934,7 @@ class BoundCompositeKernel:
         return False
 
     def is_cacheable(self) -> bool:
-        """Not cacheable via helion's ``Cache[Search]``: the composite's
+        """Not cacheable via helion's `Cache[Search]`: the composite's
         config persistence is vLLM's ConfigManager (per CaseKey), and the
         composite cache fingerprint is not shape-sensitive."""
         return False
@@ -914,14 +964,15 @@ class CompositeKernel:
     """A composite helion kernel defined by a body calling child kernels.
 
     Args:
-        body: ``def body(run, *args)`` -- the composite operation. ``run`` is
-            the framework's child-call context (also exposing ``tunable``);
+        body: `def body(run, *args)` -- the composite operation. `run` is
+            the framework's child-call context (also exposing `tunable`);
             the remaining parameters are the composite's outward signature.
         settings: Composite-level helion settings (baseline fn and accuracy
             check for the whole body, search effort).
-        stage_plan: Site groups for the three-stage schedule, or ``None``
+        stage_plan: Site groups for the three-stage schedule, or `None`
             (default) for the two-stage one. A registered composite passes the
-            plan its ``register_kernel(stage_plan=...)`` declares.
+            plan its `register_kernel(stage_plan=...)` declares.
+
     """
 
     def __init__(
@@ -1007,7 +1058,7 @@ class CompositeKernel:
         arg_sets: Sequence[tuple[Any, ...]],
         effort: str,
         overrides: Mapping[str, Any] | None,
-        seed: helion.Config | None = None,
+        seed: helion.Config | Sequence[helion.Config] | None = None,
         autotune_kwargs: Mapping[str, Any] | None = None,
     ) -> tuple[helion.Config, float]:
         """One LFBOTreeSearch over the composite with a fixed override set."""
@@ -1069,11 +1120,36 @@ class CompositeKernel:
         best = search.autotune()
         return best, search.best.perf
 
+    def _start_values(
+        self, bound: BoundCompositeKernel, seed_config: Any | None
+    ) -> tuple[dict[str, Any], helion.Config | None]:
+        """The groups' initial values and the config to seed the stages with."""
+        default = bound.config_spec.default_config()
+        if seed_config is None:
+            return _joint_dict(default), None
+        try:
+            seed = _fit_joint_config(bound, seed_config)
+        except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
+            logger.warning(
+                "Composite '%s': not seeding from the existing config, it does "
+                "not fit this program (%s: %s)",
+                self.name,
+                type(e).__name__,
+                str(e).splitlines()[0][:200] if str(e) else "",
+            )
+            return _joint_dict(default), None
+        logger.info(
+            "Composite '%s': starting from the existing config, untuned sites "
+            "stay pinned to it",
+            self.name,
+        )
+        return _joint_dict(seed), seed
+
     @staticmethod
     def _pin_section(
         name: str, section: Mapping[str, Any], keys: Any = None
     ) -> dict[str, Any]:
-        """Pin a whole site section, or only ``keys`` of it, to its values."""
+        """Pin a whole site section, or only `keys` of it, to its values."""
         chosen = section if keys is None else [k for k in keys if k in section]
         return {f"children.{name}.{key}": section[key] for key in chosen}
 
@@ -1081,10 +1157,10 @@ class CompositeKernel:
     def _site_space(site: _Site) -> dict[str, Any]:
         """Every tunable in the site's search space, at its fragment default.
 
-        ``ConfigSpec.default_config`` omits keys that are still searched (e.g.
-        ``num_sm_multiplier``), so pinning only what that section holds leaves
+        `ConfigSpec.default_config` omits keys that are still searched (e.g.
+        `num_sm_multiplier`), so pinning only what that section holds leaves
         those keys free -- the sampler then draws them independently of the
-        pinned ones (``num_sm_multiplier`` with a non-persistent ``pid_type``)
+        pinned ones (`num_sm_multiplier` with a non-persistent `pid_type`)
         and most candidates are rejected before they are ever measured.
         """
         gen = site.spec.create_config_generation()
@@ -1114,13 +1190,14 @@ class CompositeKernel:
         free: Mapping[str, bool],
         *,
         free_codegen_pins: bool = False,
+        follow_section: bool = False,
     ) -> dict[str, Any]:
-        """Freeze every group ``free`` does not mark free at its known values.
+        """Freeze every group `free` does not mark free at its known values.
 
-        A free site keeps only its codegen-shape keys pinned (``_STAGE_PINS``),
+        A free site keeps only its codegen-shape keys pinned (`_STAGE_PINS`),
         so the stage's compiled-kernel count stays proportional to the primary
         dimensions it explores; a pinned site is frozen over its entire space.
-        With ``free_codegen_pins`` the stage searches ``_STAGE_PINS`` too: a
+        With `free_codegen_pins` the stage searches `_STAGE_PINS` too: a
         free site keeps its full space and a pinned site is frozen except for
         those keys, matching the implied final stage.
         """
@@ -1134,7 +1211,12 @@ class CompositeKernel:
             if free.get(name, True):
                 if not free_codegen_pins:
                     overrides.update(
-                        self._pin_section(name, _resolved_stage_pins(section))
+                        self._pin_section(
+                            name,
+                            _resolved_stage_pins(
+                                section, follow_section=follow_section
+                            ),
+                        )
                     )
                 continue
             complete = self._pinned_section(name, section, sites)
@@ -1150,7 +1232,7 @@ class CompositeKernel:
     def _final_overrides(
         self, bound: BoundCompositeKernel, values: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """The implied last stage: only ``_STAGE_PINS`` stay free."""
+        """The implied last stage: only `_STAGE_PINS` stay free."""
         overrides = {
             f"root.{key}": value for key, value in values.get("root", {}).items()
         }
@@ -1171,20 +1253,31 @@ class CompositeKernel:
         args: CaseInputs,
         *,
         autotune_effort: str = "quick",
+        seed_config: Any | None = None,
     ) -> helion.Config:
         """Search the joint (root + per-site) space, one stage at a time.
+
+        `seed_config` is a joint config to start from, typically the kernel's
+        own pre-tuned config for this case. It seeds every stage's initial
+        population (measured, and pinned into the final verification, exactly
+        like helion's `from_best_available` strategy treats a user seed), and
+        it is the value every group a stage does not free is frozen at -- so a
+        plan that leaves sites untuned keeps their pre-tuned sections instead of
+        the fragment defaults. The caller is expected to have checked that it
+        runs on these inputs; one that does not fit this program is reported and
+        ignored, leaving the run identical to an unseeded one.
 
         Every candidate is a complete joint config measured by running the
         whole body, so inter-kernel effects are inside the measurement. A case
         may carry several arg sets (multi-input); each candidate is then
         measured on all of them and scored by the geometric mean.
 
-        The stages come from the kernel's ``CompositeStagePlan``: each one
+        The stages come from the kernel's `CompositeStagePlan`: each one
         names an action and the tunables it applies to, with every other
         tunable taking the opposite action (see that class), and the run ends
         with an implied stage that frees the codegen-shape keys for every site
         and freezes everything else at the winner. A plan with
-        ``final_stage=False`` drops that stage and frees the codegen-shape keys
+        `final_stage=False` drops that stage and frees the codegen-shape keys
         in every declared stage instead. A kernel without a plan runs
         the two-stage schedule, i.e. an empty plan: everything free, then the
         codegen shape free and everything else frozen.
@@ -1193,8 +1286,8 @@ class CompositeKernel:
         its space contains that winner, so the returned config is never worse
         than the previous stage's under this stage's measurement regime.
 
-        Every stage runs ``autotune_effort`` unless its plan entry (or
-        ``final_stage_kwargs`` for the implied final stage) overrides it. The
+        Every stage runs `autotune_effort` unless its plan entry (or
+        `final_stage_kwargs` for the implied final stage) overrides it. The
         effort also sets helion's initial population and whether it is padded
         with random configs, so one effort for the whole run keeps every stage
         equally wide; per-stage autotune kwargs exist to deviate deliberately.
@@ -1207,9 +1300,9 @@ class CompositeKernel:
         plan = self.stage_plan if self.stage_plan is not None else CompositeStagePlan()
         plan.validate(bound.config_spec.site_names)
 
-        # Latest known values per group: the spec defaults until a stage tunes
-        # them, the stage winner afterwards.
-        values = _joint_dict(bound.config_spec.default_config())
+        # Latest known values per group: the seed config's (or the spec
+        # defaults) until a stage tunes them, the stage winner afterwards.
+        values, seed = self._start_values(bound, seed_config)
         groups = ("root", *bound.config_spec.site_names)
         total_stages = len(plan.stages) + (1 if plan.final_stage else 0)
         best: helion.Config | None = None
@@ -1221,9 +1314,13 @@ class CompositeKernel:
                 arg_sets,
                 autotune_effort,
                 self._stage_overrides(
-                    bound, values, free, free_codegen_pins=free_codegen_pins
+                    bound,
+                    values,
+                    free,
+                    free_codegen_pins=free_codegen_pins,
+                    follow_section=seed is not None,
                 ),
-                seed=best,
+                seed=_stage_seeds(seed, best),
                 autotune_kwargs=plan.autotune_kwargs(index),
             )
             logger.info(
@@ -1242,7 +1339,7 @@ class CompositeKernel:
                 arg_sets,
                 autotune_effort,
                 self._final_overrides(bound, values),
-                seed=best,
+                seed=_stage_seeds(seed, best),
                 autotune_kwargs=plan.final_autotune_kwargs,
             )
             logger.info(

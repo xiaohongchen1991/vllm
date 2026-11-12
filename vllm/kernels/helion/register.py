@@ -60,7 +60,12 @@ from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
-from vllm.kernels.helion.composite import CompositeKernel, CompositeStagePlan
+from vllm.kernels.helion.composite import (
+    CompositeKernel,
+    CompositeStagePlan,
+    _joint_dict,
+    is_composite_body,
+)
 from vllm.kernels.helion.inputs import CaseInputs, normalize_arg_sets
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
@@ -301,6 +306,7 @@ class HelionKernelWrapper:
         input_generator: (Callable[[], dict[CaseKey, CaseInputs]] | None) = None,
         use_variant_config: bool = False,
         stage_plan: CompositeStagePlan | None = None,
+        autotune_from_existing_config: bool = True,
     ):
         # Validate helion_settings doesn't conflict with our custom autotuner
         validate_helion_settings(helion_settings, op_name)
@@ -314,6 +320,7 @@ class HelionKernelWrapper:
         self._mutates_args = mutates_args
         self.use_variant_config = use_variant_config
         self.stage_plan = stage_plan
+        self.autotune_from_existing_config = autotune_from_existing_config
         self._configured_kernel: ConfiguredHelionKernel | None = None
         # TODO(@gmagogsfm): Remove this disable flag once integrated with vLLM IR,
         # which handles op enablement/disablement.
@@ -370,10 +377,14 @@ class HelionKernelWrapper:
         A case carries either one argument tuple or several (multi-input): the
         latter tunes a single config across all of them, so the winner is
         robust to the per-input variation rather than fitted to one draw.
-        """
-        from vllm.kernels.helion.composite import is_composite_body
 
+        With `autotune_from_existing_config`, the kernel's own pre-tuned config
+        for this case seeds the search: it is measured alongside the generated
+        candidates and, for a composite, it stays the value of every site the
+        stage plan does not tune.
+        """
         arg_sets = normalize_arg_sets(inputs)
+        seed = self._existing_config(arg_sets[0])
 
         if is_composite_body(self.raw_kernel_func):
             # Composite kernel: search the joint (root tunables + per-call-site
@@ -384,12 +395,16 @@ class HelionKernelWrapper:
                 settings=self.helion_settings,
                 stage_plan=self.stage_plan,
             )
-            return composite.autotune(arg_sets, autotune_effort=autotune_effort)
+            return composite.autotune(
+                arg_sets, autotune_effort=autotune_effort, seed_config=seed
+            )
 
         extra_kwargs = {
             "autotune_effort": autotune_effort,
             "autotune_ignore_errors": True,
         }
+        if seed is not None:
+            extra_kwargs["autotune_seed_configs"] = seed
         autotune_kernel = create_helion_decorated_kernel(
             self.raw_kernel_func, self.helion_settings, extra_kwargs
         )
@@ -399,6 +414,63 @@ class HelionKernelWrapper:
         # because vLLM runs with static_shapes=False and installs baseline /
         # accuracy callbacks (see Kernel.autotune_multi).
         return autotune_kernel.autotune_multi(arg_sets, cache_tag=self.op_name)
+
+    def _existing_config(self, args: tuple[Any, ...]) -> Config | None:
+        """The pre-tuned config these args select, if it runs on them.
+
+        A config that does not compile or launch for this shape (a stale entry,
+        a section too large for this device) is not a useful starting point, so
+        it is reported and the search runs unseeded instead.
+        """
+        if not self.autotune_from_existing_config:
+            return None
+        try:
+            configured = self.get_configured_op()
+        except (RuntimeError, ValueError) as e:
+            logger.debug("No pre-tuned config to seed '%s': %s", self.op_name, e)
+            return None
+        configs, picker = configured.configs, configured.config_picker
+        if not configs or picker is None:
+            return None
+        try:
+            selected = picker(args, list(configs))
+        except Exception:  # noqa: BLE001 - a picker that cannot classify: no seed
+            return None
+        if selected is None:
+            selected = CaseKey.default()
+        config = configs.get(selected)
+        if config is None or not self._config_runs(args, config):
+            return None
+        logger.info(
+            "Seeding autotuning of '%s' from its pre-tuned config (key '%s')",
+            self.op_name,
+            selected,
+        )
+        return config
+
+    def _config_runs(self, args: tuple[Any, ...], config: Config) -> bool:
+        try:
+            if is_composite_body(self.raw_kernel_func):
+                CompositeKernel(
+                    self.raw_kernel_func,
+                    settings=self.helion_settings,
+                    stage_plan=self.stage_plan,
+                ).configure(_joint_dict(config))(*args)
+            else:
+                kernel = create_helion_decorated_kernel(
+                    self.raw_kernel_func, self.helion_settings
+                )
+                kernel.bind(args).compile_config(config)(*args)
+        except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
+            logger.warning(
+                "Pre-tuned config for '%s' does not run these inputs (%s: %s); "
+                "autotuning without seeding from it",
+                self.op_name,
+                type(e).__name__,
+                str(e).splitlines()[0][:200] if str(e) else "",
+            )
+            return False
+        return True
 
     def get_configured_op(self) -> ConfiguredHelionKernel:
         if self._disabled:
@@ -476,6 +548,7 @@ def register_kernel(
     input_generator: (Callable[[], dict[CaseKey, tuple[Any, ...]]] | None) = None,
     use_variant_config: bool = False,
     stage_plan: CompositeStagePlan | None = None,
+    autotune_from_existing_config: bool = True,
 ) -> Callable[[Callable], HelionKernelWrapper]:
     """Register a Helion kernel with pre-tuned config selection.
 
@@ -508,16 +581,22 @@ def register_kernel(
                         "8192": (torch.randn(8192, device="cuda"), 0.5),
                     }
 
-        use_variant_config: Optional. When ``True``, configs are
+        use_variant_config: Optional. When `True`, configs are
             looked up by the variant-specific GPU name (e.g.
-            ``nvidia_h100_pcie``) instead of the canonical name shared by all
-            variants (e.g. ``nvidia_h100``). Defaults to ``False``, which
+            `nvidia_h100_pcie`) instead of the canonical name shared by all
+            variants (e.g. `nvidia_h100`). Defaults to `False`, which
             preserves the canonical-name lookup used by most kernels.
 
         stage_plan: Optional. Site groups for the composite kernel's
-            three-stage autotune schedule (see ``CompositeStagePlan``). Only
-            meaningful for a composite body; ``None`` keeps the two-stage
+            three-stage autotune schedule (see `CompositeStagePlan`). Only
+            meaningful for a composite body; `None` keeps the two-stage
             schedule.
+        autotune_from_existing_config: Whether autotuning starts from the
+            kernel's own pre-tuned config for the case (default `True`). The
+            config is measured as a seed and, for a composite, is the value kept
+            by every site the stage plan leaves untuned; one that does not run
+            on the case's inputs is reported and the search runs unseeded.
+
     """
 
     def decorator(kernel_func: Callable) -> HelionKernelWrapper:
@@ -551,6 +630,7 @@ def register_kernel(
             input_generator=input_generator,
             use_variant_config=use_variant_config,
             stage_plan=stage_plan,
+            autotune_from_existing_config=autotune_from_existing_config,
         )
 
         _REGISTERED_KERNELS[final_op_name] = kernel_wrapper

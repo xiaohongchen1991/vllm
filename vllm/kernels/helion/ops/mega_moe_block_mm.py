@@ -210,6 +210,7 @@ STAGE_PLAN = CompositeStagePlan(
         "moe_route.0",
         {"initial_population": 30},
     ),
+    final_stage=True,
     final_stage_kwargs={"min_improvement_delta": 0.005, "polish_rounds": 2},
 )
 
