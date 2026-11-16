@@ -416,11 +416,12 @@ class HelionKernelWrapper:
         return autotune_kernel.autotune_multi(arg_sets, cache_tag=self.op_name)
 
     def _existing_config(self, args: tuple[Any, ...]) -> Config | None:
-        """The pre-tuned config these args select, if it runs on them.
+        """The pre-tuned config these args select, fitted to what can run here.
 
-        A config that does not compile or launch for this shape (a stale entry,
-        a section too large for this device) is not a useful starting point, so
-        it is reported and the search runs unseeded instead.
+        For a composite, a site section that cannot be adapted, compiled or run
+        is dropped and the rest of the config still seeds the run, so the sites
+        the stage plan leaves untuned keep their pre-tuned values. A config with
+        nothing usable is reported and the search starts unseeded.
         """
         if not self.autotune_from_existing_config:
             return None
@@ -439,7 +440,28 @@ class HelionKernelWrapper:
         if selected is None:
             selected = CaseKey.default()
         config = configs.get(selected)
-        if config is None or not self._config_runs(args, config):
+        if config is None:
+            return None
+        if is_composite_body(self.raw_kernel_func):
+            # A composite salvages what it can: the valid site configs still
+            # seed the run (and pin the sites the stage plan does not tune) even
+            # when some sections cannot be adapted, compiled or run.
+            joint = CompositeKernel(
+                self.raw_kernel_func,
+                settings=self.helion_settings,
+                stage_plan=self.stage_plan,
+            ).prepare_seed(args, _joint_dict(config))
+            if joint is None:
+                return None
+            logger.info(
+                "Seeding autotuning of '%s' from its pre-tuned config (key '%s', "
+                "%d of its site config(s))",
+                self.op_name,
+                selected,
+                len(joint.get("children", {})),
+            )
+            return Config.from_dict(joint)
+        if not self._config_runs(args, config):
             return None
         logger.info(
             "Seeding autotuning of '%s' from its pre-tuned config (key '%s')",
@@ -449,18 +471,12 @@ class HelionKernelWrapper:
         return config
 
     def _config_runs(self, args: tuple[Any, ...], config: Config) -> bool:
+        """Whether a single-kernel config compiles and runs on these inputs."""
         try:
-            if is_composite_body(self.raw_kernel_func):
-                CompositeKernel(
-                    self.raw_kernel_func,
-                    settings=self.helion_settings,
-                    stage_plan=self.stage_plan,
-                ).configure(_joint_dict(config))(*args)
-            else:
-                kernel = create_helion_decorated_kernel(
-                    self.raw_kernel_func, self.helion_settings
-                )
-                kernel.bind(args).compile_config(config)(*args)
+            kernel = create_helion_decorated_kernel(
+                self.raw_kernel_func, self.helion_settings
+            )
+            kernel.bind(args).compile_config(config)(*args)
         except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
             logger.warning(
                 "Pre-tuned config for '%s' does not run these inputs (%s: %s); "

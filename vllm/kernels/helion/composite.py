@@ -54,6 +54,17 @@ from helion.autotuner.config_fragment import ConfigSpecFragment
 from helion.autotuner.config_generation import ConfigGeneration
 from helion.autotuner.effort_profile import get_effort_profile
 
+try:
+    # Helion routes backend-specific autotuner behaviour through these (no-op
+    # defaults for the triton children); a helion predating them never reads
+    # the attributes below, so the import is optional.
+    from helion.autotuner.search_surface import BackendSearchSurface
+
+    _HAS_SEARCH_SURFACE = True
+except ImportError:  # pragma: no cover - older helion
+    BackendSearchSurface = None  # type: ignore[assignment, misc]
+    _HAS_SEARCH_SURFACE = False
+
 from vllm.kernels.helion.inputs import CaseInputs, normalize_arg_sets
 from vllm.logger import init_logger
 
@@ -368,28 +379,45 @@ def _adapt_section(spec: Any, section: Any) -> helion.Config:
     return spec.normalized_config(helion.Config.from_dict(adapted))
 
 
-def _fit_joint_config(bound: BoundCompositeKernel, config: Any) -> helion.Config:
+def _fit_joint_config(
+    bound: BoundCompositeKernel, config: Any
+) -> tuple[helion.Config, tuple[str, ...]]:
     """`config` fitted to this binding: known keys, live sites, defaults filled.
 
     A pre-tuned config may carry root values or section keys the current body
     no longer defines (an older schema) and sections for sites this program does
     not call. Those are dropped rather than pinned into the search, where an
-    unknown override would reach the child's config generation.
+    unknown override would reach the child's config generation. A section the
+    site's spec cannot adapt at all is dropped on its own and reported, so the
+    remaining sites can still seed the run.
+
+    Returns:
+        The fitted joint config, and the names of the sections left out.
+
     """
     spec = bound.config_spec
     joint = _joint_dict(config)
     known_root = set(spec.default_config().config["root"])
     sections = joint.get("children", {})
-    children = {}
+    children: dict[str, Any] = {}
+    dropped: list[str] = []
     for site in spec.sites:
         section = sections.get(site.name)
         if not isinstance(section, dict):
             continue
         space = CompositeKernel._site_space(site)
-        children[site.name] = {
-            key: value for key, value in section.items() if key in space
-        }
-    return spec.normalized_config(
+        furnished = {key: value for key, value in section.items() if key in space}
+        try:
+            children[site.name] = dict(_adapt_section(site.spec, furnished).config)
+        except Exception as e:  # noqa: BLE001 - one bad section is not fatal
+            dropped.append(site.name)
+            logger.warning(
+                "Dropping the pre-tuned config of site '%s': %s: %s",
+                site.name,
+                type(e).__name__,
+                str(e).splitlines()[0][:200] if str(e) else "",
+            )
+    fitted = spec.normalized_config(
         {
             "root": {
                 key: value
@@ -399,6 +427,7 @@ def _fit_joint_config(bound: BoundCompositeKernel, config: Any) -> helion.Config
             "children": children,
         }
     )
+    return fitted, tuple(dropped)
 
 
 def _stage_seeds(
@@ -564,6 +593,12 @@ class CompositeConfigSpec:
                 for k, v in s.spec.user_defined_tunables.items()
             },
         }
+        if _HAS_SEARCH_SURFACE:
+            # The backend's contribution to the search (config keys, compiler
+            # seeds, refinement keys, flat-normalization phases). The children
+            # are triton kernels and contribute nothing, so this is the shared
+            # no-op default; helion's searches read it unconditionally.
+            self.search_surface = BackendSearchSurface()
         self.compiler_seed_configs: tuple[Any, ...] = ()
         self.compiler_seed_timeout_retry_repetitions = None
         self.cute_flash_search_enabled = False
@@ -722,6 +757,14 @@ class CompositeConfigGeneration(ConfigGeneration):
         # search touches (see helion/autotuner/base_search.py and
         # surrogate_pattern_search.py).
         self.config_spec = config_spec
+        # One hook object per generation, as ConfigGeneration.__init__ makes it.
+        # The no-op default: the population/search hooks it adds are backend
+        # behaviour, and the composite contributes none of its own (the child
+        # generations carry their own).
+        if _HAS_SEARCH_SURFACE:
+            self.extension = config_spec.search_surface.config_generation_extension(
+                self
+            )
         self._root: dict[str, ConfigSpecFragment] = dict(config_spec._root)
         self._sites: list[_Site] = list(config_spec._sites)
         self._override_values: dict[str, Any] = dict(overrides or {})
@@ -1128,7 +1171,7 @@ class CompositeKernel:
         if seed_config is None:
             return _joint_dict(default), None
         try:
-            seed = _fit_joint_config(bound, seed_config)
+            seed, _dropped = _fit_joint_config(bound, seed_config)
         except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
             logger.warning(
                 "Composite '%s': not seeding from the existing config, it does "
@@ -1144,6 +1187,119 @@ class CompositeKernel:
             self.name,
         )
         return _joint_dict(seed), seed
+
+    def prepare_seed(self, args: tuple[Any, ...], config: Any) -> dict[str, Any] | None:
+        """A joint config to start autotuning from, or None if nothing survives.
+
+        The pre-tuned config is fitted to this program, each site's section is
+        compiled on its own, and the survivors are run once as a whole body. A
+        section that cannot be adapted or compiled -- or that makes the body
+        fail -- is dropped instead of discarding the whole config, so the sites
+        the stage plan does not tune can still be pinned to their pre-tuned
+        values. Sites a stage searches are dropped first, since the run re-tunes
+        them anyway; the last resort is the root values alone.
+        """
+        bound = self.bind(args)
+        try:
+            fitted, dropped = _fit_joint_config(bound, config)
+        except Exception as e:  # noqa: BLE001 - not a usable joint config at all
+            logger.warning(
+                "Composite '%s': ignoring the pre-tuned config (%s: %s)",
+                self.name,
+                type(e).__name__,
+                str(e).splitlines()[0][:200] if str(e) else "",
+            )
+            return None
+        remaining = self._compiled_sections(bound, fitted)
+        root = fitted.config["root"]
+        # Try each surviving section in the body on its own, so one section that
+        # fails at run time cannot take the others down with it.
+        survivors = {
+            name: section
+            for name, section in remaining.items()
+            if self._joint_runs({"root": root, "children": {name: section}}, args)
+        }
+        dropped += tuple(name for name in remaining if name not in survivors)
+        while True:
+            joint = {"root": root, "children": dict(survivors)}
+            if self._joint_runs(joint, args):
+                break
+            if not survivors:
+                return None
+            # The sections only fail together (a layout interaction): give up the
+            # searched ones first, since the stages re-tune them anyway.
+            victim = next(iter(survivors))
+            logger.warning(
+                "Composite '%s': the pre-tuned config of site '%s' does not run "
+                "combined with the others; leaving it out",
+                self.name,
+                victim,
+            )
+            survivors.pop(victim)
+            dropped += (victim,)
+        if dropped:
+            logger.warning(
+                "Composite '%s': pinning %d of %d pre-tuned site config(s); "
+                "left out: %s",
+                self.name,
+                len(survivors),
+                len(fitted.config["children"]),
+                sorted(set(dropped)),
+            )
+        return joint
+
+    def _compiled_sections(
+        self, bound: BoundCompositeKernel, fitted: helion.Config
+    ) -> dict[str, Any]:
+        """The sections that compile on their own, tuned sites first."""
+        sites = {site.name: site for site in bound.config_spec.sites}
+        sections = fitted.config["children"]
+        tuned = self._searched_sites(bound)
+        order = sorted(
+            sections,
+            key=lambda name: (name not in tuned, list(sections).index(name)),
+        )
+        kept: dict[str, Any] = {}
+        for name in order:
+            try:
+                sites[name].bound.compile_config(
+                    _section_config(sections[name]), allow_print=False
+                )
+            except Exception as e:  # noqa: BLE001 - one bad section is not fatal
+                logger.warning(
+                    "Composite '%s': the pre-tuned config of site '%s' does not "
+                    "compile (%s: %s); leaving it out",
+                    self.name,
+                    name,
+                    type(e).__name__,
+                    str(e).splitlines()[0][:200] if str(e) else "",
+                )
+                continue
+            kept[name] = sections[name]
+        return kept
+
+    def _searched_sites(self, bound: BoundCompositeKernel) -> set[str]:
+        """Sites some stage of the plan searches, i.e. re-tunes anyway."""
+        groups = ("root", *bound.config_spec.site_names)
+        plan = self.stage_plan if self.stage_plan is not None else CompositeStagePlan()
+        searched: set[str] = set()
+        for index in range(len(plan.stages)):
+            free = plan.free_groups(index, groups)
+            searched.update(name for name, is_free in free.items() if is_free)
+        return searched
+
+    def _joint_runs(self, joint: Mapping[str, Any], args: tuple[Any, ...]) -> bool:
+        try:
+            self.configure(dict(joint))(*args)
+        except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
+            logger.warning(
+                "Composite '%s': the pre-tuned config does not run (%s: %s)",
+                self.name,
+                type(e).__name__,
+                str(e).splitlines()[0][:200] if str(e) else "",
+            )
+            return False
+        return True
 
     @staticmethod
     def _pin_section(

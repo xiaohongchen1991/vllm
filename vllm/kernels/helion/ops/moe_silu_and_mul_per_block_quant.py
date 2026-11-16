@@ -2,26 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helion silu-and-mul + per-block quantization of the MoE intermediate.
 
-Same math as ``ops.silu_and_mul_per_block_quant`` -- ``silu(gate) * up``, then
-one dynamic fp8 (or int8) scale per ``group_size`` columns -- with the two
+Same math as `ops.silu_and_mul_per_block_quant` -- `silu(gate) * up`, then
+one dynamic fp8 (or int8) scale per `group_size` columns -- with the two
 changes the MoE path needs:
 
-* ``clamp_limit``: the SwiGLU clamp applied *before* the nonlinearity (the gate
-  clamped from above, the up half symmetrically), as ``swiglu_limit_func``
-  does. The fused CUDA op has no clamp argument, so ``TritonExperts`` falls
-  back to two launches; this kernel keeps it fused. ``None`` traces a variant
+* `clamp_limit`: the SwiGLU clamp applied *before* the nonlinearity (the gate
+  clamped from above, the up half symmetrically), as `swiglu_limit_func`
+  does. The fused CUDA op has no clamp argument, so `TritonExperts` falls
+  back to two launches; this kernel keeps it fused. `None` traces a variant
   without the clamp, so the common case carries no extra ops.
-* ``num_valid``: the on-rank slot count, a device tensor (``None`` = every row
+* `num_valid`: the on-rank slot count, a device tensor (`None` = every row
   is a candidate). Only rows below it hold slots this rank computes (the
   permuted MoE layouts pack them at the head), so the tile loop prunes the tail
   in-kernel and rows past the count are left untouched -- no host sync, so the
   composite stays CUDA-graph compatible. Layouts that interleave off-rank rows
-  (the unpermuted staging is indexed by routed-slot id) pass ``topk_ids`` /
-  ``expert_map`` instead, and rows are masked per slot exactly as
-  ``ops.moe_sum`` decides them.
+  (the unpermuted staging is indexed by routed-slot id) pass `topk_ids` /
+  `expert_map` instead, and rows are masked per slot exactly as
+  `ops.moe_sum` decides them.
 
-The standalone kernel's ``scale_ub`` (per-group amax upper bound) and
-``is_scale_transposed`` (already a no-op placeholder) are not carried over:
+The standalone kernel's `scale_ub` (per-group amax upper bound) and
+`is_scale_transposed` (already a no-op placeholder) are not carried over:
 the MoE block-quant path never bounds the scale, and the transposed layout
 only exists for the standalone quantization kernels' callers.
 """
@@ -126,7 +126,6 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
          pick the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
-
     if not config_keys:
         return None
 
@@ -178,6 +177,7 @@ def fake_impl(
     num_valid: torch.Tensor | None = None,  # [1] int32: on-rank slot count
     topk_ids: torch.Tensor | None = None,  # [rows, top_k] int32
     expert_map: torch.Tensor | None = None,  # [global_num_experts] int32
+    scale_ue8m0: bool = False,  # round each group scale up to a power of two
 ) -> None:
     return
 
@@ -191,6 +191,7 @@ def baseline(
     num_valid: torch.Tensor | None = None,  # [1] int32: on-rank slot count
     topk_ids: torch.Tensor | None = None,  # [rows, top_k] int32
     expert_map: torch.Tensor | None = None,  # [global_num_experts] int32
+    scale_ue8m0: bool = False,  # round each group scale up to a power of two
 ) -> None:
     num_tokens, intermediate_size = out.shape
     groups_per_row = intermediate_size // group_size
@@ -215,6 +216,8 @@ def baseline(
 
     s = torch.amax(torch.abs(x_grouped), dim=-1)
     s = (s * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
+    if scale_ue8m0:
+        s = torch.exp2(torch.ceil(torch.log2(s)))
 
     y = x_grouped / s[:, :, None]
     if quant_dtype == torch.int8:
@@ -262,6 +265,9 @@ def moe_silu_and_mul_per_block_quant(
     num_valid: torch.Tensor | None = None,  # [1] int32: on-rank slot count
     topk_ids: torch.Tensor | None = None,  # [rows, top_k] int32
     expert_map: torch.Tensor | None = None,  # [global_num_experts] int32
+    # Round each group scale up to a power of two, so a downstream projection
+    # reading it as an e8m0 byte applies exactly the scale it was quantized with.
+    scale_ue8m0: hl.constexpr = False,
 ) -> None:
     # This code assumes batch_dim and num_tokens are flattened
     assert input.ndim == 2
@@ -328,6 +334,7 @@ def moe_silu_and_mul_per_block_quant(
     if topk_ids is not None:
         flat_topk = topk_ids.reshape(-1)
 
+    hl.pdl_wait()
     hl.pdl_launch_dependents()
 
     for tile_m, tile_gn, tile_n in hl.tile(
@@ -366,11 +373,6 @@ def moe_silu_and_mul_per_block_quant(
             col_mask = (tile_gn.index + groups_per_row < 2 * groups_per_row)[
                 None, :, None
             ]
-            # The grid-dependency wait is inlined right before the input load:
-            # the routing tensors (``num_valid``, ``topk_ids``, ``expert_map``)
-            # come from the routing stage, not from the immediately preceding
-            # one, so the masks above are safe to compute before waiting.
-            hl.inline_triton("tl.extra.cuda.gdc_wait()", args=(), output_like=None)
             x_a_blk = hl.load(
                 input,
                 [tile_m, tile_gn, tile_n],
@@ -390,6 +392,8 @@ def moe_silu_and_mul_per_block_quant(
             s_blk = torch.amax(torch.abs(x_blk), dim=-1).to(torch.float32)
             s_blk = s_blk * (1.0 / qtype_max)
             s_blk = s_blk.clamp(min=min_scaling_factor)
+            if scale_ue8m0:
+                s_blk = torch.exp2(torch.ceil(torch.log2(s_blk)))
 
             hl.store(
                 scales,
