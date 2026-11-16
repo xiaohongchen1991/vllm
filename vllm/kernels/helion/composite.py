@@ -213,6 +213,7 @@ class CompositeStagePlan:
         *stages: Sequence[Any],
         final_stage: bool = True,
         final_stage_kwargs: Mapping[str, Any] | None = None,
+        seed_codegen_shape: bool = True,
     ):
         if not stages and not final_stage:
             raise ValueError("A plan needs at least one stage when final_stage=False")
@@ -225,6 +226,15 @@ class CompositeStagePlan:
         )
         self.final_autotune_kwargs: dict[str, Any] = dict(final_stage_kwargs or {})
         self.final_stage = final_stage
+        # When seeding from an existing config, whether the non-final stages hold
+        # a free site's codegen shape (``_STAGE_PINS``: indexing, eviction hints,
+        # range_* etc.) at the *seed's* values (True, the default -- the
+        # block-size search is measured against the codegen the seed found good)
+        # or at the kernel's *default* codegen (False -- the search starts from
+        # the pointer/default shape and the implied final stage tunes the codegen
+        # from there). Only consulted with ``final_stage=True`` and a seed; a
+        # non-seeded run always pins the defaults.
+        self.seed_codegen_shape = seed_codegen_shape
 
     def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
         """The per-stage autotune overrides carried by stage `index`."""
@@ -275,6 +285,7 @@ class CompositeStagePlan:
             "CompositeStagePlan("
             + "; ".join(parts)
             + ("" if self.final_stage else ", final_stage=False")
+            + ("" if self.seed_codegen_shape else ", seed_codegen_shape=False")
             + ")"
         )
 
@@ -1347,6 +1358,7 @@ class CompositeKernel:
         *,
         free_codegen_pins: bool = False,
         follow_section: bool = False,
+        seed_codegen_shape: bool = True,
     ) -> dict[str, Any]:
         """Freeze every group `free` does not mark free at its known values.
 
@@ -1366,11 +1378,25 @@ class CompositeKernel:
         for name, section in values.get("children", {}).items():
             if free.get(name, True):
                 if not free_codegen_pins:
+                    # A free site keeps its codegen shape pinned. With
+                    # seed_codegen_shape it follows the seed-derived section;
+                    # otherwise it is pinned to the kernel's default codegen
+                    # (resolving _STAGE_PINS against the default config, so the
+                    # literal pins fall to pointer/"" and the None pins to the
+                    # spec defaults), decoupling the block-size search from a
+                    # seed's codegen.
+                    site = sites.get(name)
+                    if seed_codegen_shape or site is None:
+                        pin_section = section
+                        pin_follow = follow_section
+                    else:
+                        pin_section = site.spec.default_config().config
+                        pin_follow = False
                     overrides.update(
                         self._pin_section(
                             name,
                             _resolved_stage_pins(
-                                section, follow_section=follow_section
+                                pin_section, follow_section=pin_follow
                             ),
                         )
                     )
@@ -1475,6 +1501,7 @@ class CompositeKernel:
                     free,
                     free_codegen_pins=free_codegen_pins,
                     follow_section=seed is not None,
+                    seed_codegen_shape=plan.seed_codegen_shape,
                 ),
                 seed=_stage_seeds(seed, best),
                 autotune_kwargs=plan.autotune_kwargs(index),
