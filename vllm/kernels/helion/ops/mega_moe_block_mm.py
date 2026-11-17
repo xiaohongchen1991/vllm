@@ -248,6 +248,39 @@ def _e8m0_bytes(scale: torch.Tensor) -> torch.Tensor:
     return (scale.view(torch.int32) >> 23).to(torch.uint8)
 
 
+def _e8m0_to_fp32(byte: torch.Tensor) -> torch.Tensor:
+    """An e8m0 byte as the fp32 power of two it encodes (inverse of `_e8m0_bytes`).
+
+    Places the 8-bit biased exponent (bias 127, shared with fp32) into the fp32
+    exponent field with zero sign and mantissa, so `2 ^ (byte - 127)`.
+    """
+    return (byte.to(torch.int32) << 23).view(torch.float32)
+
+
+def _e8m0_k32(scale: torch.Tensor) -> torch.Tensor:
+    """A ue8m0 fp32 block scale `[..., C // 128]` as the kernel's stored weight
+    scale: e8m0 bytes replicated to the MMA's 32-element K granularity,
+    `[..., C // 32]` uint8.
+
+    The 128-wide block scale is the same across the four 32-wide sub-groups the
+    microscaled MMA consumes, so pre-replicating here (once, at input/load time)
+    removes the in-kernel replicate + exponent extraction from the dot_scaled
+    hot path. Same byte count as the fp32 `[..., C // 128]` form (one fp32 ->
+    four bytes).
+    """
+    return _e8m0_bytes(scale).repeat_interleave(4, dim=-1)
+
+
+def _e8m0_k32_to_fp32(scale_u8: torch.Tensor) -> torch.Tensor:
+    """Inverse of `_e8m0_k32`: e8m0 `[..., C // 32]` uint8 -> fp32 `[..., C // 128]`.
+
+    Takes one byte per 128-wide block (the four replicas are identical) and
+    decodes it to the fp32 power of two. For the eager/reference baselines, which
+    want the original `[..., C // 128]` fp32 scale.
+    """
+    return _e8m0_to_fp32(scale_u8[..., ::4].contiguous())
+
+
 # The composite's child GEMM: a plain helion kernel (the composite owns tuning
 # and accuracy). static_shapes=False keeps the align outputs' runtime sizes
 # (max_padded / num_blocks) unspecialized, as in the fused kernel. Codegen-shape
@@ -266,7 +299,7 @@ def moe_block_mm(
     aq: torch.Tensor,  # [M, K] fp8; M = num_tokens or num_tokens * top_k
     aq_scale: torch.Tensor,  # [M, K // 128]
     w: torch.Tensor,  # [E, N, K] fp8
-    w_scale: torch.Tensor,  # [E, N // 128, K // 128]
+    w_scale: torch.Tensor,  # [E, N // 128, K // 32] uint8 e8m0
     sorted_token_ids: torch.Tensor | None,  # align output, int32; None = dense layout
     expert_ids: torch.Tensor,  # align output, int32
     num_tokens: int,
@@ -380,11 +413,17 @@ def moe_block_mm(
     assert num_tokens_post_padded.numel() == 1
 
     assert aq_scale.ndim == 2 and w_scale.ndim == 3
-    assert aq_scale.dtype == w_scale.dtype and aq_scale.is_floating_point()
+    # Activation scale stays fp32 [M, K // 128] (produced at runtime by the quant
+    # kernels); weight scale is stored as e8m0 bytes replicated to the 32-element
+    # K granularity [E, N // 128, K // 32] (`_e8m0_k32`), so the dot_scaled path
+    # loads it straight into the MMA and the explicit-scale path decodes one byte
+    # per 128-block.
+    assert aq_scale.is_floating_point()
+    assert w_scale.dtype == torch.uint8
 
     num_group_k = aq_scale.shape[1]
     num_group_n = w_scale.shape[1]
-    assert w_scale.shape == (E, num_group_n, num_group_k)
+    assert w_scale.shape == (E, num_group_n, 4 * num_group_k)
     assert aq_scale.shape == (M, num_group_k)
 
     assert K % num_group_k == 0
@@ -594,6 +633,8 @@ def moe_block_mm(
                         # masked byte and its data lanes are masked too.
                         inner_groups = tile_k.block_size // group_k
                         first_group = tile_k.begin // group_k
+                        # Activation scale is fp32 per 128-group: replicate each
+                        # over its four 32-sub-groups and extract the e8m0 byte.
                         group_cols = first_group + hl.arange(4 * inner_groups) // 4
                         group_mask = group_cols < num_group_k
                         aq_scale_u8 = _e8m0_bytes(
@@ -603,38 +644,37 @@ def moe_block_mm(
                                 extra_mask=token_mask[:, None] & group_mask[None, :],
                             )
                         )
-                        w_scale_u8 = _e8m0_bytes(
-                            hl.load(
+                        # Weight scale is already e8m0 bytes at 32-group
+                        # granularity: index the K // 32 axis directly (no
+                        # replicate, no exponent extraction) and feed the MMA.
+                        k32_cols = first_group * 4 + hl.arange(4 * inner_groups)
+                        k32_mask = k32_cols < 4 * num_group_k
+                        w_scale_u8 = hl.load(
+                            w_scale,
+                            [
+                                e + hl.arange(1),
+                                (tile_n.index // group_n)[:, None],
+                                k32_cols[None, :],
+                            ],
+                            extra_mask=(tile_n.index // group_n < num_group_n)[
+                                None, :, None
+                            ]
+                            & k32_mask[None, None, :],
+                        ).squeeze(0)
+                        if fuse_act_quant:
+                            w2_scale_u8 = hl.load(
                                 w_scale,
                                 [
                                     e + hl.arange(1),
-                                    (tile_n.index // group_n)[:, None],
-                                    group_cols[None, :],
+                                    ((tile_n.index + adjusted_N) // group_n)[:, None],
+                                    k32_cols[None, :],
                                 ],
-                                extra_mask=(tile_n.index // group_n < num_group_n)[
-                                    None, :, None
-                                ]
-                                & group_mask[None, None, :],
+                                extra_mask=(
+                                    (tile_n.index + adjusted_N) // group_n
+                                    < num_group_n
+                                )[None, :, None]
+                                & k32_mask[None, None, :],
                             ).squeeze(0)
-                        )
-                        if fuse_act_quant:
-                            w2_scale_u8 = _e8m0_bytes(
-                                hl.load(
-                                    w_scale,
-                                    [
-                                        e + hl.arange(1),
-                                        ((tile_n.index + adjusted_N) // group_n)[
-                                            :, None
-                                        ],
-                                        group_cols[None, :],
-                                    ],
-                                    extra_mask=(
-                                        (tile_n.index + adjusted_N) // group_n
-                                        < num_group_n
-                                    )[None, :, None]
-                                    & group_mask[None, None, :],
-                                ).squeeze(0)
-                            )
                         if swap_ab:
                             # No `acc=`: the product is [n, m] (weights as the
                             # MMA's lhs), so it is transposed into the shared
@@ -710,23 +750,29 @@ def moe_block_mm(
                             [aq_rows, gk_idx + hl.arange(1)],
                             extra_mask=token_mask[:, None],
                         )
-                        w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][
-                            None, :
-                        ]
+                        # Weight scale is e8m0 bytes at 32-group granularity;
+                        # read one byte per 128-group (the four replicas are
+                        # identical, so index gk_idx * 4) and decode to fp32.
+                        w_scale_blk = _e8m0_to_fp32(
+                            w_scale[e, tile_n.index // group_n, gk_idx * 4]
+                        )[None, :]
                         if fuse_act_quant:
                             # 1-D index and mask (e and gk_idx are scalars), then
                             # the same [None, :] promotion as the gate half.
-                            w2_scale_blk = hl.load(
-                                w_scale,
-                                [
-                                    e + hl.arange(1),
-                                    (tile_n.index + adjusted_N) // group_n,
-                                    gk_idx + hl.arange(1),
-                                ],
-                                extra_mask=(
-                                    (tile_n.index + adjusted_N) // group_n < num_group_n
-                                )[None, :, None],
-                            ).squeeze(-1)
+                            w2_scale_blk = _e8m0_to_fp32(
+                                hl.load(
+                                    w_scale,
+                                    [
+                                        e + hl.arange(1),
+                                        (tile_n.index + adjusted_N) // group_n,
+                                        gk_idx * 4 + hl.arange(1),
+                                    ],
+                                    extra_mask=(
+                                        (tile_n.index + adjusted_N) // group_n
+                                        < num_group_n
+                                    )[None, :, None],
+                                ).squeeze(-1)
+                            )
 
                         acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
                         if fuse_act_quant:
@@ -1054,11 +1100,14 @@ def _generate_input(
     w1_scale = 0.5 + torch.rand(
         num_local_experts, num_group_n, num_group_k, dtype=scale_dtype, device="cuda"
     )
-    w1_scale = _ceil_to_ue8m0(w1_scale)
+    # Store weight scales as e8m0 bytes at 32-group K granularity
+    # ([E, O // 128, C // 32] uint8): round to a power of two, then pack+replicate
+    # once here so both GEMM paths consume them without an in-kernel transform.
+    w1_scale = _e8m0_k32(_ceil_to_ue8m0(w1_scale))
     w2_scale = 0.5 + torch.rand(
         num_local_experts, num_group_h, num_group_i, dtype=scale_dtype, device="cuda"
     )
-    w2_scale = _ceil_to_ue8m0(w2_scale)
+    w2_scale = _e8m0_k32(_ceil_to_ue8m0(w2_scale))
 
     # A TP+EP rank's view: the rank this draw loads most heavily owns the local
     # experts (reindexed from 0), every other expert is -1. Off-rank slots never
@@ -1261,8 +1310,8 @@ def fake_impl(
     hidden_states: torch.Tensor,  # [num_tokens, K] fp8
     w1: torch.Tensor,  # [E, N, K] fp8 (gate_up, N = 2 * intermediate)
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
-    w1_scale: torch.Tensor,  # [E, N // 128, K // 128]
-    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128]
+    w1_scale: torch.Tensor,  # [E, N // 128, K // 32] uint8 e8m0
+    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 32] uint8 e8m0
     a1q_scale: torch.Tensor | None,  # [num_tokens, K // 128]; None if not fp8
     topk_weights: torch.Tensor,  # [num_tokens, top_k] routed combine weights
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
@@ -1336,8 +1385,8 @@ def baseline(
     hidden_states: torch.Tensor,  # [num_tokens, K] fp8
     w1: torch.Tensor,  # [E, N, K] fp8 (gate_up, N = 2 * intermediate)
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
-    w1_scale: torch.Tensor,  # [E, N // 128, K // 128]
-    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128]
+    w1_scale: torch.Tensor,  # [E, N // 128, K // 32] uint8 e8m0
+    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 32] uint8 e8m0
     a1q_scale: torch.Tensor | None,  # [num_tokens, K // 128]; None if not fp8
     topk_weights: torch.Tensor,  # [num_tokens, top_k] routed combine weights
     topk_ids: torch.Tensor,  # [num_tokens, top_k]
@@ -1358,6 +1407,11 @@ def baseline(
     N = w1.shape[1]
     H = w2.shape[1]
     routed = num_tokens * top_k
+
+    # Weight scales arrive as e8m0 bytes at 32-group K granularity; decode to the
+    # fp32 [E, O // 128, C // 128] block scale this reference dequantizes with.
+    w1_scale = _e8m0_k32_to_fp32(w1_scale)
+    w2_scale = _e8m0_k32_to_fp32(w2_scale)
 
     if a1q_scale is None:
         # Non-fp8 input: quantize with the same block quantizer the kernel uses,
@@ -1483,8 +1537,8 @@ def mega_moe_block_mm(
     hidden_states: torch.Tensor,  # [num_tokens, K] fp8
     w1: torch.Tensor,  # [E, N, K] fp8 (gate_up, N = 2 * intermediate)
     w2: torch.Tensor,  # [E, H, intermediate] fp8 (down projection)
-    w1_scale: torch.Tensor,  # [E, N // 128, K // 128]
-    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 128]
+    w1_scale: torch.Tensor,  # [E, N // 128, K // 32] uint8 e8m0
+    w2_scale: torch.Tensor,  # [E, H // 128, intermediate // 32] uint8 e8m0
     a1q_scale: torch.Tensor | None,  # [num_tokens, K // 128]; None if not fp8
     topk_weights: torch.Tensor,  # [num_tokens, top_k]
     topk_ids: torch.Tensor,  # [num_tokens, top_k]

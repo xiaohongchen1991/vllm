@@ -18,6 +18,34 @@ from typing import NamedTuple
 
 import torch
 
+# mega_moe_block_mm stores weight scales as e8m0 bytes at 32-group K granularity
+# ([E, O // 128, C // 32] uint8). The reference/production baselines want the
+# fp32 [E, O // 128, C // 128] block scale, so decode once per weight tensor and
+# cache by id -- this is load-time weight prep, excluded from the timed region
+# (the first, warmup call fills the cache; timed calls hit it).
+_W_SCALE_FP32_CACHE: dict[int, tuple[weakref.ref, torch.Tensor]] = {}
+
+
+def _w_scale_to_fp32(scale: torch.Tensor) -> torch.Tensor:
+    """Decode an e8m0 `[E, O // 128, C // 32]` uint8 weight scale to fp32
+    `[E, O // 128, C // 128]`, cached by tensor id so the conversion is not timed.
+    """
+    if scale.dtype != torch.uint8:
+        return scale
+    key = id(scale)
+    entry = _W_SCALE_FP32_CACHE.get(key)
+    if entry is not None and entry[0]() is scale:
+        return entry[1]
+    # One byte per 128-block (the four 32-group replicas are identical), decoded
+    # to the fp32 power of two it encodes.
+    coarse = scale[..., ::4].contiguous().to(torch.int32)
+    fp32 = (coarse << 23).view(torch.float32)
+    _W_SCALE_FP32_CACHE[key] = (
+        weakref.ref(scale, lambda _, k=key: _W_SCALE_FP32_CACHE.pop(k, None)),
+        fp32,
+    )
+    return fp32
+
 
 def _block_scaled_mm(
     out: torch.Tensor,  # [M, N]
@@ -212,6 +240,8 @@ def triton_moe_block_mm(
     GEMM2 staging buffers are workspace-backed so the timed region allocates
     nothing. Runs on any Triton-capable GPU (e.g. SM120).
     """
+    w1_scale = _w_scale_to_fp32(w1_scale)
+    w2_scale = _w_scale_to_fp32(w2_scale)
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         _prepare_expert_assignment,
@@ -492,6 +522,8 @@ def flashinfer_moe_block_mm(
     local block this rank owns through ``ep_size``/``ep_rank`` -- the same
     information ``expert_map`` carries for the Triton path.
     """
+    w1_scale = _w_scale_to_fp32(w1_scale)
+    w2_scale = _w_scale_to_fp32(w2_scale)
     from vllm.platforms import current_platform
 
     if not current_platform.is_device_capability(90):
@@ -665,6 +697,8 @@ def trtllm_moe_block_mm(
     ``process_weights_after_loading`` performs for this backend, cached across
     calls here; only the scale transpose is per-call work, as in ``apply``.
     """
+    w1_scale = _w_scale_to_fp32(w1_scale)
+    w2_scale = _w_scale_to_fp32(w2_scale)
     from vllm.platforms import current_platform
 
     if (
