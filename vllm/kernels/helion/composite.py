@@ -214,6 +214,7 @@ class CompositeStagePlan:
         final_stage: bool = True,
         final_stage_kwargs: Mapping[str, Any] | None = None,
         seed_codegen_shape: bool = True,
+        seed_root: bool = True,
     ):
         if not stages and not final_stage:
             raise ValueError("A plan needs at least one stage when final_stage=False")
@@ -235,6 +236,17 @@ class CompositeStagePlan:
         # from there). Only consulted with ``final_stage=True`` and a seed; a
         # non-seeded run always pins the defaults.
         self.seed_codegen_shape = seed_codegen_shape
+        # When seeding from an existing config, whether a stage that *pins* the
+        # root group holds it at the seed's root tunables (True, the default) or
+        # at the kernel's *default* root tunables (False). False lets a close
+        # (non-exact) seed accelerate the per-site search while keeping a
+        # ``(PIN, "root", ...)`` stage structural -- e.g. the default
+        # ``fuse_moe_sum`` so that stage's free auxiliary kernels (moe_sum, ...)
+        # are actually exercised instead of pinned to a seed that skips them. A
+        # later stage that frees root still searches it from the default
+        # baseline. The per-site sections keep seeding either way; only consulted
+        # with a seed and a stage that pins root.
+        self.seed_root = seed_root
 
     def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
         """The per-stage autotune overrides carried by stage `index`."""
@@ -286,6 +298,7 @@ class CompositeStagePlan:
             + "; ".join(parts)
             + ("" if self.final_stage else ", final_stage=False")
             + ("" if self.seed_codegen_shape else ", seed_codegen_shape=False")
+            + ("" if self.seed_root else ", seed_root=False")
             + ")"
         )
 
@@ -1359,6 +1372,8 @@ class CompositeKernel:
         free_codegen_pins: bool = False,
         follow_section: bool = False,
         seed_codegen_shape: bool = True,
+        seed_root: bool = True,
+        default_root: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Freeze every group `free` does not mark free at its known values.
 
@@ -1371,8 +1386,16 @@ class CompositeKernel:
         """
         overrides: dict[str, Any] = {}
         if not free["root"]:
+            # A pinned root follows the seed-derived values, or the kernel's
+            # default root tunables when seed_root is off -- so a close seed
+            # still speeds the per-site search while a (PIN, "root", ...) stage
+            # stays structural (e.g. default fuse_moe_sum, so its free aux
+            # kernels are exercised rather than pinned to a seed that skips them).
+            root_values = (
+                values["root"] if seed_root or default_root is None else default_root
+            )
             overrides.update(
-                {f"root.{key}": value for key, value in values["root"].items()}
+                {f"root.{key}": value for key, value in root_values.items()}
             )
         sites = {site.name: site for site in bound.config_spec.sites}
         for name, section in values.get("children", {}).items():
@@ -1485,6 +1508,7 @@ class CompositeKernel:
         # Latest known values per group: the seed config's (or the spec
         # defaults) until a stage tunes them, the stage winner afterwards.
         values, seed = self._start_values(bound, seed_config)
+        default_root = _joint_dict(bound.config_spec.default_config()).get("root", {})
         groups = ("root", *bound.config_spec.site_names)
         total_stages = len(plan.stages) + (1 if plan.final_stage else 0)
         best: helion.Config | None = None
@@ -1502,6 +1526,8 @@ class CompositeKernel:
                     free_codegen_pins=free_codegen_pins,
                     follow_section=seed is not None,
                     seed_codegen_shape=plan.seed_codegen_shape,
+                    seed_root=plan.seed_root,
+                    default_root=default_root,
                 ),
                 seed=_stage_seeds(seed, best),
                 autotune_kwargs=plan.autotune_kwargs(index),
