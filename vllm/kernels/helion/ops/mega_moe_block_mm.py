@@ -235,19 +235,6 @@ def _align_sizes(
     return max_padded, num_blocks
 
 
-def _e8m0_bytes(scale: torch.Tensor) -> torch.Tensor:
-    """A ue8m0 fp32 scale as its e8m0 byte, i.e. `2 ^ (byte - 127) == scale`.
-
-    `tl.dot_scaled` scales are e8m0 bytes, and fp32 and e8m0 share the exponent
-    bias, so the byte is just the fp32 exponent field. This assumes the scale is
-    a power of two -- guaranteed by the ue8m0 producers (`per_token_group_quant_fp8`
-    rounds with `exp2(ceil(log2(.)))` in the DeepSeek FP8 path, and the DeepGEMM
-    weight scales are rounded the same way); a value between powers of two would
-    be floored rather than rounded here.
-    """
-    return (scale.view(torch.int32) >> 23).to(torch.uint8)
-
-
 # The composite's child GEMM: a plain helion kernel (the composite owns tuning
 # and accuracy). static_shapes=False keeps the align outputs' runtime sizes
 # (max_padded / num_blocks) unspecialized, as in the fused kernel. Codegen-shape
@@ -279,19 +266,9 @@ def moe_block_mm(
     fuse_moe_sum: hl.constexpr = False,  # accumulate into the [num_tokens, N] output
     clamp_limit: hl.constexpr | None = None,  # silu/up clamp of the fused epilogue
     output_scale: torch.Tensor | None = None,  # [routed, N // 2 // 128] fp32 (out)
-    # Run this projection on tl.dot_scaled, which applies the block scales inside
-    # the MMA. The caller sets it only when every scale it feeds -- this GEMM's
-    # activations and weights -- is a ue8m0 value.
-    use_dot_scaled: hl.constexpr = False,
-    # Round the fused act-quant epilogue's output scale to a power of two. This
-    # scale feeds the *next* GEMM (the down projection), so it tracks that GEMM's
-    # dot_scaled flag, which may differ from this one's. Only consulted when a
-    # fused epilogue runs (``output_scale is not None``).
-    output_scale_ue8m0: hl.constexpr = False,
     # Transposed operand order (weights as the MMA's lhs). An input rather than a
-    # tunable so the branch resolves at trace time: the dot_scaled form keeps its
-    # accumulator in the product's own [N, M] orientation, which a launch-time
-    # constexpr cannot express without carrying both accumulators.
+    # tunable so the branch resolves at trace time: only the selected orientation
+    # is traced.
     swap_ab: hl.constexpr = False,
 ) -> None:
     M, K = aq.shape
@@ -456,21 +433,6 @@ def moe_block_mm(
     m_block_size = hl.register_block_size(align_block_size)
     n_block_size = hl.register_block_size(min_n_block_size, adjusted_N)
 
-    # Register the wide range unconditionally so the composite's bind pass (which
-    # only ever sees the default root branch) captures it regardless of the
-    # use_dot_scaled default. Only the dot_scaled MMA consumes a K tile spanning
-    # several 128-wide scale groups; the explicit-scale path reads one scale per
-    # tile, so its loop steps by group_k and ignores the tuned value for this
-    # block id (the registered dimension stays in the config either way).
-    inner_k_block_size = hl.register_block_size(group_k, max(k_block_size, group_k))
-
-    # `tl.dot_scaled` applies the block scales inside the MMA and accumulates the
-    # [M, N] result the non-swapped orientation produces; the swapped orientation
-    # keeps the explicit fp32 promotion below, which stays exact for the rounded
-    # scales a dot_scaled run feeds it.
-    if use_dot_scaled:
-        assert aq.dtype == torch.float8_e4m3fn, "use_dot_scaled needs e4m3 activations"
-
     # Grid-dependency waits are inlined inside the tile loop instead of using
     # ``hl.pdl_wait`` at entry, because the down projection must issue its
     # weight tile before waiting while the gate_up projection must wait before
@@ -543,22 +505,9 @@ def moe_block_mm(
                 if fuse_act_quant:
                     acc2 = hl.zeros([tile_m, tile_n], torch.float32)
 
-                if swap_ab and use_dot_scaled:
-                    # The MMA's product is [n, m]: the loop accumulates in that
-                    # orientation (starting from the zeroed [m, n] accumulator's
-                    # view, so no second buffer is materialized) and the epilogue
-                    # reads it back as [m, n] after the loop.
-                    accT = acc.t()
-                    if fuse_act_quant:
-                        acc2T = acc2.t()
-
                 # Keep block_size = group_k for the K dimension so the block scale
                 # is constant across each inner tile.
-                for tile_k in hl.tile(
-                    outer_k.begin,
-                    outer_k.end,
-                    block_size=inner_k_block_size if use_dot_scaled else GROUP_K,
-                ):
+                for tile_k in hl.tile(outer_k.begin, outer_k.end, block_size=group_k):
                     # Weight tiles never depend on the producing stage: issue
                     # them before the down projection's in-loop wait.
                     w_blk = w[e, tile_n, tile_k]
@@ -584,160 +533,51 @@ def moe_block_mm(
                     )
 
                     gk_idx = tile_k.id
-                    if use_dot_scaled:
-                        # The MMA applies both block scales itself: one e8m0 byte
-                        # per 32-element K group, so a K tile covering several
-                        # 128-wide groups needs each group's scale repeated over
-                        # its four 32-element sub-groups. The weight scale is per
-                        # N lane (its 128-wide blocks arrive as one value per
-                        # column). The tail of a split-K chunk past K reads a
-                        # masked byte and its data lanes are masked too.
-                        inner_groups = tile_k.block_size // group_k
-                        first_group = tile_k.begin // group_k
-                        group_cols = first_group + hl.arange(4 * inner_groups) // 4
-                        group_mask = group_cols < num_group_k
-                        aq_scale_u8 = _e8m0_bytes(
-                            hl.load(
-                                aq_scale,
-                                [aq_rows[:, None], group_cols[None, :]],
-                                extra_mask=token_mask[:, None] & group_mask[None, :],
-                            )
-                        )
-                        w_scale_u8 = _e8m0_bytes(
-                            hl.load(
-                                w_scale,
-                                [
-                                    e + hl.arange(1),
-                                    (tile_n.index // group_n)[:, None],
-                                    group_cols[None, :],
-                                ],
-                                extra_mask=(tile_n.index // group_n < num_group_n)[
-                                    None, :, None
-                                ]
-                                & group_mask[None, None, :],
-                            ).squeeze(0)
+                    if swap_ab:
+                        acc_blk = (
+                            hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
+                            .t()
+                            .to(torch.float32)
                         )
                         if fuse_act_quant:
-                            w2_scale_u8 = _e8m0_bytes(
-                                hl.load(
-                                    w_scale,
-                                    [
-                                        e + hl.arange(1),
-                                        ((tile_n.index + adjusted_N) // group_n)[
-                                            :, None
-                                        ],
-                                        group_cols[None, :],
-                                    ],
-                                    extra_mask=(
-                                        (tile_n.index + adjusted_N) // group_n
-                                        < num_group_n
-                                    )[None, :, None]
-                                    & group_mask[None, None, :],
-                                ).squeeze(0)
-                            )
-                        if swap_ab:
-                            # No `acc=`: the product is [n, m] (weights as the
-                            # MMA's lhs), so it is transposed into the shared
-                            # accumulator instead of carrying a transposed one
-                            # across the K loop.
-                            accT = hl.dot_scaled(
-                                w_blk,
-                                w_scale_u8,
-                                "e4m3",
-                                aq_blk.t(),
-                                aq_scale_u8,
-                                "e4m3",
-                                acc=accT,
-                                out_dtype=torch.float32,
-                            )
-                            if fuse_act_quant:
-                                acc2T = hl.dot_scaled(
-                                    w2_blk,
-                                    w2_scale_u8,
-                                    "e4m3",
-                                    aq_blk.t(),
-                                    aq_scale_u8,
-                                    "e4m3",
-                                    acc=acc2T,
-                                    out_dtype=torch.float32,
-                                )
-                        else:
-                            acc = hl.dot_scaled(
-                                aq_blk,
-                                aq_scale_u8,
-                                "e4m3",
-                                w_blk.t(),
-                                w_scale_u8,
-                                "e4m3",
-                                acc=acc,
-                                out_dtype=torch.float32,
-                            )
-                            if fuse_act_quant:
-                                acc2 = hl.dot_scaled(
-                                    aq_blk,
-                                    aq_scale_u8,
-                                    "e4m3",
-                                    w2_blk.t(),
-                                    w2_scale_u8,
-                                    "e4m3",
-                                    acc=acc2,
-                                    out_dtype=torch.float32,
-                                )
-                    else:
-                        if swap_ab:
-                            acc_blk = (
-                                hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
+                            acc2_blk = (
+                                hl.dot(w2_blk, aq_blk.t(), out_dtype=acc_dtype)
                                 .t()
                                 .to(torch.float32)
                             )
-                            if fuse_act_quant:
-                                acc2_blk = (
-                                    hl.dot(w2_blk, aq_blk.t(), out_dtype=acc_dtype)
-                                    .t()
-                                    .to(torch.float32)
-                                )
-                        else:
-                            acc_blk = hl.dot(aq_blk, w_blk.t(), out_dtype=acc_dtype).to(
-                                torch.float32
-                            )
-                            if fuse_act_quant:
-                                acc2_blk = hl.dot(
-                                    aq_blk, w2_blk.t(), out_dtype=acc_dtype
-                                ).to(torch.float32)
-
-                        aq_scale_blk = hl.load(
-                            aq_scale,
-                            [aq_rows, gk_idx + hl.arange(1)],
-                            extra_mask=token_mask[:, None],
+                    else:
+                        acc_blk = hl.dot(aq_blk, w_blk.t(), out_dtype=acc_dtype).to(
+                            torch.float32
                         )
-                        w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][
-                            None, :
-                        ]
                         if fuse_act_quant:
-                            # 1-D index and mask (e and gk_idx are scalars), then
-                            # the same [None, :] promotion as the gate half.
-                            w2_scale_blk = hl.load(
-                                w_scale,
-                                [
-                                    e + hl.arange(1),
-                                    (tile_n.index + adjusted_N) // group_n,
-                                    gk_idx + hl.arange(1),
-                                ],
-                                extra_mask=(
-                                    (tile_n.index + adjusted_N) // group_n < num_group_n
-                                )[None, :, None],
-                            ).squeeze(-1)
+                            acc2_blk = hl.dot(
+                                aq_blk, w2_blk.t(), out_dtype=acc_dtype
+                            ).to(torch.float32)
 
-                        acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
-                        if fuse_act_quant:
-                            acc2 = acc2 + (aq_scale_blk * w2_scale_blk) * acc2_blk
-
-                if swap_ab and use_dot_scaled:
-                    # The loop accumulates in the MMA's [n, m] orientation; the
-                    # epilogue and the store read the [m, n] view of it.
-                    acc = accT.t()
+                    aq_scale_blk = hl.load(
+                        aq_scale,
+                        [aq_rows, gk_idx + hl.arange(1)],
+                        extra_mask=token_mask[:, None],
+                    )
+                    w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][None, :]
                     if fuse_act_quant:
-                        acc2 = acc2T.t()
+                        # 1-D index and mask (e and gk_idx are scalars), then
+                        # the same [None, :] promotion as the gate half.
+                        w2_scale_blk = hl.load(
+                            w_scale,
+                            [
+                                e + hl.arange(1),
+                                (tile_n.index + adjusted_N) // group_n,
+                                gk_idx + hl.arange(1),
+                            ],
+                            extra_mask=(
+                                (tile_n.index + adjusted_N) // group_n < num_group_n
+                            )[None, :, None],
+                        ).squeeze(-1)
+
+                    acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
+                    if fuse_act_quant:
+                        acc2 = acc2 + (aq_scale_blk * w2_scale_blk) * acc2_blk
 
                 if fuse_act_quant:
                     # silu(gate) * up, then per-128-group fp8 quantization --
@@ -765,12 +605,6 @@ def moe_block_mm(
                     act_grouped = act.reshape(m_block_size, num_group_tile, 128)
                     s = torch.amax(torch.abs(act_grouped), dim=-1).to(torch.float32)
                     s = (s * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
-                    if output_scale_ue8m0:
-                        # The down projection reads these scales as e8m0 bytes:
-                        # round up so the stored scale is exactly the one its MMA
-                        # applies (e4m3 is scale-invariant under powers of two, so
-                        # quantizing with the rounded scale keeps the precision).
-                        s = torch.exp2(torch.ceil(torch.log2(s)))
                     q = (act_grouped / s[:, :, None]).clamp(qtype_min, qtype_max)
                     acc = q.reshape(act.shape)
                     group_idx = tile_n.begin // 128 + hl.arange(num_group_tile)
@@ -1506,12 +1340,6 @@ def mega_moe_block_mm(
     # effective ``permuted`` flag stays False. Keep the tunable registered --
     # configs are shared across shapes -- and derive the decision.
     maybe_permuted = run.tunable("maybe_permuted", _DefaultTrueBooleanFragment())
-    # Per-GEMM tl.dot_scaled: applies the block scales inside the MMA (and needs
-    # ue8m0 scales, which this body produces for that GEMM when it is on).
-    # dot_scaled_1 controls the input act-quant and GEMM1 (gate_up); dot_scaled_2
-    # controls the intermediate act-quant and GEMM2 (down).
-    dot_scaled_1 = run.tunable("dot_scaled_1", BooleanFragment())
-    dot_scaled_2 = run.tunable("dot_scaled_2", BooleanFragment())
     # Each GEMM site's operand order; the child takes it as a constexpr input so
     # only the selected orientation is traced.
     swap_ab_1 = run.tunable("swap_ab_1", BooleanFragment())
@@ -1621,7 +1449,7 @@ def mega_moe_block_mm(
             1e-10,
             fp8_min,
             fp8_max,
-            dot_scaled_1,  # scale_ue8m0: GEMM1 reads these as e8m0 bytes
+            False,  # scale_ue8m0: hl.dot reads fp32 scales directly
         )
     inv_perm = None
     num_valid = None
@@ -1734,8 +1562,6 @@ def mega_moe_block_mm(
             False,  # fuse_moe_sum: the gate_up projection never combines
             clamp_limit,
             hq_scale,
-            dot_scaled_1,  # use_dot_scaled: GEMM1's own MMA
-            dot_scaled_2,  # output_scale_ue8m0: hq_scale feeds GEMM2
             swap_ab_1,
         )
     else:
@@ -1759,8 +1585,6 @@ def mega_moe_block_mm(
             False,  # fuse_moe_sum: the gate_up projection never combines
             None,  # clamp_limit: applied before quantizing, not in the GEMM
             None,  # output_scale: no fused epilogue
-            dot_scaled_1,  # use_dot_scaled: GEMM1's own MMA
-            False,  # output_scale_ue8m0: no fused epilogue here
             swap_ab_1,
         )
 
@@ -1786,7 +1610,7 @@ def mega_moe_block_mm(
             num_valid if counted else None,
             topk_ids if masked else None,
             expert_map if masked else None,
-            dot_scaled_2,  # scale_ue8m0: GEMM2 reads these as e8m0 bytes
+            False,  # scale_ue8m0: hl.dot reads fp32 scales directly
         )
 
     # GEMM2: down projection over the per-routed-row quantized intermediate.
@@ -1819,8 +1643,6 @@ def mega_moe_block_mm(
         fuse_moe_sum,
         None,  # clamp_limit: the down projection has no act epilogue
         None,  # output_scale
-        dot_scaled_2,  # use_dot_scaled: GEMM2's own MMA
-        False,  # output_scale_ue8m0: no fused epilogue here
         swap_ab_2,
     )
 
