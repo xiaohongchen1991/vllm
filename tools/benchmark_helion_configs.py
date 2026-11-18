@@ -17,6 +17,15 @@ the kernel's defaults are filled in -- the same entry in two files, a value
 spelled out that the rest leave at its default, a key the kernel ignores -- are
 benchmarked once.
 
+`--merge-mode` changes which values a candidate owns. Under `sections`, a
+candidate contributes only the sections `--merge-section` names (by default
+`root`, `moe_route.0`, `moe_block_mm.0` and `moe_block_mm.1`); every other
+section comes from the config the kernel currently routes the case to, so a
+config tuned on another platform can be re-scored against the routing that is
+live here. `sections-pinned` additionally keeps the `--pin` entries (by default
+`root.align_block_size` and `moe_route.0`) at their routed values, so the
+candidates cannot differ in how work is split before the GEMMs.
+
 Before a config is timed, its output is checked against the kernel's registered
 reference, with the same comparison and tolerances `tools/benchmark_helion_kernels.py`
 uses for its numerics check; a config that fails is reported and skipped instead
@@ -35,6 +44,10 @@ Usage:
     # Only re-time configs stored under the case's own key
     python tools/benchmark_helion_configs.py --kernel mega_moe_block_mm \\
         --exact-key --max-configs 4
+
+    # Score only each config's routed-GEMM sections, on top of the routed config
+    python tools/benchmark_helion_configs.py --kernel mega_moe_block_mm \\
+        --config-dir /tmp/other_platform --merge-mode sections-pinned
 
     # List available kernels
     python tools/benchmark_helion_configs.py --list
@@ -92,6 +105,13 @@ from benchmark_helion_kernels import (  # noqa: E402
 )
 
 logger = init_logger("vllm.scripts.benchmark_helion_configs")
+
+# Sections a `sections` merge takes from the candidate, addressed as they are in
+# a joint config; everything else keeps the routed config's value.
+DEFAULT_MERGE_SECTIONS = ("root", "moe_route.0", "moe_block_mm.0", "moe_block_mm.1")
+# Entries a `sections-pinned` merge keeps at the routed value: a whole site
+# section, or one root tunable as `root.<name>`.
+DEFAULT_PINS = ("root.align_block_size", "moe_route.0")
 
 
 @dataclass
@@ -231,10 +251,13 @@ def normalize_config(value: Any, default: Any) -> Any:
 class RunnerFactory:
     """Builds a callable per config, and the default config of a case's program."""
 
-    def __init__(self, wrapper: Any):
+    def __init__(self, wrapper: Any, kernel_name: str, platform: str):
         self.wrapper = wrapper
+        self.kernel_name = kernel_name
+        self.platform = platform
         self._composite: CompositeKernel | None = None
         self._kernel: Any = None
+        self._routed: tuple[dict[CaseKey, Any], Any] | None = None
         if is_composite_body(wrapper.raw_kernel_func):
             # The composite owns its children's configs, so it compiles them
             # from the joint (root + children) dict.
@@ -247,6 +270,38 @@ class RunnerFactory:
             self._kernel = create_helion_decorated_kernel(
                 wrapper.raw_kernel_func, wrapper.helion_settings
             )
+
+    def routed_config(self, args: tuple[Any, ...]) -> dict[str, Any]:
+        """The joint config the kernel currently routes `args` to.
+
+        The base a merge mode re-seats candidates on: the entry the kernel's own
+        picker selects from the platform file for this case. Sections the spec
+        has outgrown, and ones the entry leaves out, are settled by the caller
+        against the program's default config.
+        """
+        assert self._composite is not None, "merge modes need a composite kernel"
+        if self._routed is None:
+            configs = ConfigManager().get_platform_configs(
+                self.kernel_name, self.platform
+            )
+            picker = self.wrapper.get_configured_op().config_picker
+            self._routed = (configs, picker)
+        configs, picker = self._routed
+        selected = picker(args, list(configs)) if picker is not None else None
+        if selected is None:
+            selected = CaseKey.default()
+        config = configs.get(selected)
+        if config is None:
+            raise LookupError(
+                f"no config stored under key '{selected}' "
+                f"for platform '{self.platform}'"
+            )
+        logger.info(
+            "Merging onto the config routed to key '%s' of platform '%s'",
+            selected,
+            self.platform,
+        )
+        return _joint_dict(config)
 
     def spec_default(self, args: tuple[Any, ...]) -> dict[str, Any]:
         """Default config of the program `args` traces."""
@@ -298,11 +353,26 @@ def benchmark_candidate(
     ]
 
 
+def case_spec_default(
+    case: str, factory: RunnerFactory, args: tuple[Any, ...]
+) -> dict[str, Any] | None:
+    """The default config of the program `args` traces, or None if unknown."""
+    try:
+        return factory.spec_default(args)
+    except Exception as e:  # noqa: BLE001 - fall back to exact comparison
+        logger.warning(
+            "%s: cannot derive the program's default config (%s); "
+            "comparing configs as stored",
+            case,
+            type(e).__name__,
+        )
+        return None
+
+
 def unique_candidates(
     case: str,
     candidates: list[Candidate],
-    factory: RunnerFactory,
-    arg_sets: list[tuple[Any, ...]],
+    spec_default: dict[str, Any] | None,
     exact_key: CaseKey | None,
 ) -> list[Candidate]:
     """Drop configs that resolve to a config already in the list.
@@ -313,17 +383,6 @@ def unique_candidates(
     the program's default config before comparing, so each distinct config is
     benchmarked once.
     """
-    try:
-        spec_default = factory.spec_default(arg_sets[0])
-    except Exception as e:  # noqa: BLE001 - fall back to exact comparison
-        logger.warning(
-            "%s: cannot derive the program's default config (%s); "
-            "deduplicating on the raw configs",
-            case,
-            type(e).__name__,
-        )
-        spec_default = None
-
     unique: list[Candidate] = []
     seen: dict[str, Candidate] = {}
     considered = 0
@@ -359,6 +418,98 @@ def unique_candidates(
     return unique
 
 
+def merge_sections(
+    config: dict[str, Any],
+    base: dict[str, Any],
+    sections: list[str],
+    pins: list[str],
+) -> dict[str, Any]:
+    """Re-seat a candidate's sections on the routed config's other sections.
+
+    A section named in `sections` -- the root included -- is taken from
+    `config`, keeping `base`'s value for any key `config` leaves out; every
+    other section stays `base`'s. `pins` names entries that keep `base`'s value
+    either way: a whole section as `moe_route.0`, or one root tunable as
+    `root.align_block_size`.
+    """
+    merged_root = {**base.get("root", {}), **config.get("root", {})}
+    base_children = base.get("children", {})
+    merged_children = {name: dict(section) for name, section in base_children.items()}
+    for name in sections:
+        section = config.get("children", {}).get(name)
+        if isinstance(section, dict):
+            merged_children[name] = {**merged_children.get(name, {}), **section}
+    for pin in pins:
+        if pin.startswith("root."):
+            key = pin.removeprefix("root.")
+            if key in base.get("root", {}):
+                merged_root[key] = base["root"][key]
+        elif pin in base_children:
+            merged_children[pin] = dict(base_children[pin])
+    return {"root": merged_root, "children": merged_children}
+
+
+def merged_candidates(
+    case: str,
+    candidates: list[Candidate],
+    factory: RunnerFactory,
+    args: tuple[Any, ...],
+    spec_default: dict[str, Any] | None,
+    sections: list[str],
+    pins: list[str],
+) -> list[Candidate]:
+    """Rebuild every candidate on the config the case is currently routed to."""
+    try:
+        base = factory.routed_config(args)
+    except Exception as e:  # noqa: BLE001 - no routed config: start from default
+        if spec_default is None:
+            raise
+        logger.warning(
+            "%s: no routed config to merge onto (%s: %s); "
+            "using the program's default config",
+            case,
+            type(e).__name__,
+            str(e).splitlines()[0][:200] if str(e) else "",
+        )
+        base = normalize_config({}, spec_default)
+    if spec_default is not None:
+        base = normalize_config(base, spec_default)
+        site_names = set(base.get("children", {}))
+        root_names = set(base.get("root", {}))
+        unknown: list[str] = []
+        for name in [*sections, *pins]:
+            if name == "root":
+                continue
+            if name.startswith("root."):
+                if name.removeprefix("root.") not in root_names:
+                    unknown.append(name)
+            elif name not in site_names:
+                unknown.append(name)
+        if unknown:
+            logger.warning(
+                "%s: no such section or tunable %s; it keeps the routed config",
+                case,
+                sorted(set(unknown)),
+            )
+    merged = [
+        Candidate(
+            source=candidate.source,
+            source_key=candidate.source_key,
+            config=merge_sections(candidate.config, base, sections, pins),
+        )
+        for candidate in candidates
+    ]
+    logger.info(
+        "%s: re-seated %d candidate config(s) on the routed config "
+        "(from the candidates: %s; pinned: %s)",
+        case,
+        len(merged),
+        ", ".join(sections),
+        ", ".join(pins) or "none",
+    )
+    return merged
+
+
 def select_for_case(
     key: CaseKey,
     arg_sets: list[tuple[Any, ...]],
@@ -370,9 +521,24 @@ def select_for_case(
 ) -> CaseResult:
     case = str(key)
     result = CaseResult(case=case, key=key)
+    spec_default = (
+        case_spec_default(case, factory, arg_sets[0])
+        if args.dedupe or args.merge_mode != "off"
+        else None
+    )
+    if args.merge_mode != "off":
+        candidates = merged_candidates(
+            case,
+            candidates,
+            factory,
+            arg_sets[0],
+            spec_default,
+            args.merge_section,
+            args.pin,
+        )
     if args.dedupe:
         candidates = unique_candidates(
-            case, candidates, factory, arg_sets, key if args.exact_key else None
+            case, candidates, spec_default, key if args.exact_key else None
         )
     for candidate in candidates:
         if args.max_configs and len(result.trials) >= args.max_configs:
@@ -459,9 +625,12 @@ def write_config_file(path: Path, results: list[CaseResult]) -> None:
     logger.info("Wrote %d config(s) to %s", len(pairs), path)
 
 
-def write_report(path: Path, kernel: str, results: list[CaseResult]) -> None:
+def write_report(
+    path: Path, kernel: str, merge_mode: str, results: list[CaseResult]
+) -> None:
     report = {
         "kernel": kernel,
+        "merge_mode": merge_mode,
         "cases": [
             {
                 "case": result.case,
@@ -551,6 +720,32 @@ def main() -> None:
         "--exact-key",
         action="store_true",
         help="Only try configs stored under the case's own key",
+    )
+    parser.add_argument(
+        "--merge-mode",
+        choices=["off", "sections", "sections-pinned"],
+        default="off",
+        help="Rebuild each candidate on the case's routed config first: "
+        "'sections' takes only the --merge-section sections from the candidate "
+        "and keeps every other section at its routed value; "
+        "'sections-pinned' also keeps the --pin entries routed (default: off)",
+    )
+    parser.add_argument(
+        "--merge-section",
+        action="append",
+        default=[],
+        metavar="SECTION",
+        help="Section a candidate owns under --merge-mode 'sections' (repeatable; "
+        f"default: {', '.join(DEFAULT_MERGE_SECTIONS)})",
+    )
+    parser.add_argument(
+        "--pin",
+        action="append",
+        default=[],
+        metavar="ENTRY",
+        help="Section, or root tunable as root.<name>, kept at the routed value "
+        "under a merge mode (repeatable; default for 'sections-pinned': "
+        f"{', '.join(DEFAULT_PINS)})",
     )
     parser.add_argument(
         "--max-configs",
@@ -645,6 +840,14 @@ def main() -> None:
 
     composite = is_composite_body(wrapper.raw_kernel_func)
     platform = args.platform or get_config_gpu_name(wrapper.use_variant_config)
+    if args.merge_mode != "off":
+        if not composite:
+            parser.error("--merge-mode needs a kernel whose config has sections")
+        if not args.merge_section:
+            args.merge_section = list(DEFAULT_MERGE_SECTIONS)
+        if not args.pin and args.merge_mode == "sections-pinned":
+            args.pin = list(DEFAULT_PINS)
+
     paths = resolve_config_paths(
         kernel_name, platform, args.config_dir, args.config_path
     )
@@ -674,7 +877,7 @@ def main() -> None:
         if args.output
         else Path.cwd() / f"helion_config_{kernel_name}_{platform}.json"
     )
-    factory = RunnerFactory(wrapper)
+    factory = RunnerFactory(wrapper, kernel_name, platform)
 
     results: list[CaseResult] = []
     with default_vllm_config(), torch.inference_mode():
@@ -712,7 +915,7 @@ def main() -> None:
 
     write_config_file(output, results)
     if args.report:
-        write_report(Path(args.report), kernel_name, results)
+        write_report(Path(args.report), kernel_name, args.merge_mode, results)
 
     missing = [result.case for result in results if result.best is None]
     if missing:
