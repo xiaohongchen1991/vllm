@@ -460,13 +460,21 @@ def moe_block_mm(
         if blk * align_block_size < ntp:
             e = expert_ids[blk]
             rows = blk * align_block_size + tile_m.index
+            # The M tile may overshoot the block: ``allow_overshoot`` lets the
+            # autotuner pick m_block_size > align_block_size, since a block
+            # larger than the dimension can map to a more efficient MMA tile.
+            # The lanes past the block are the next block's rows, so they must
+            # not be read, stored or atomically added here -- the implicit
+            # tile-bound mask covers plain loads and stores, but not the
+            # hand-masked atomic below.
+            lane_mask = tile_m.index < align_block_size
             if sorted_token_ids is None:
                 # Dense layout: block b is routed slot b, derived
                 # arithmetically -- no sorted-ids load, no padding.
                 offs_token = rows
-                token_mask = rows < routed
+                token_mask = lane_mask & (rows < routed)
             else:
-                row_mask = rows < max_padded
+                row_mask = lane_mask & (rows < max_padded)
                 offs_token = hl.load(sorted_token_ids, [rows], extra_mask=row_mask)
                 token_mask = row_mask & (offs_token < routed)
 
