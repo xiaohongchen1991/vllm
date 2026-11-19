@@ -43,7 +43,7 @@ import dataclasses
 import inspect
 import signal
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from typing import Any
 
 import helion
@@ -160,13 +160,22 @@ def _parse_stage(
 class CompositeStagePlan:
     """Ordered stages that pin or free parts of a composite's search space.
 
-    A selector is `"root"` (the root tunables) or a site name
-    (`<child kernel>.<call index>`, in body call order). Each stage states
-    one action and the tunables it applies to; every tunable it does not name
-    takes the opposite action, so a stage is a complete partition of the space:
+    A selector is `"root"` (the root tunables), one root tunable on its own as
+    `"root.<name>"`, or a site name (`<child kernel>.<call index>`, in body call
+    order). Each stage states one action and the tunables it applies to; every
+    tunable it does not name takes the opposite action, so a stage is a complete
+    partition of the space:
 
     * `(FREE, ...)` searches the named tunables and pins the rest.
     * `(PIN, ...)` pins the named tunables and searches the rest.
+
+    Naming `"root"` covers the whole root group; naming `root.<name>` covers
+    just those tunables, so a stage can search one layout knob together with one
+    site while the rest of the root stays at its known values::
+
+        CompositeStagePlan(
+            (FREE, "root.swap_ab_1", "root.split_k_1", "moe_block_mm.0"),
+        )
 
     Pinned tunables are frozen at their latest known values -- ConfigSpec
     defaults before the group has been tuned, the stage winner afterwards --
@@ -215,6 +224,7 @@ class CompositeStagePlan:
         final_stage_kwargs: Mapping[str, Any] | None = None,
         seed_codegen_shape: bool = True,
         seed_root: bool = True,
+        seed_search: bool = True,
     ):
         if not stages and not final_stage:
             raise ValueError("A plan needs at least one stage when final_stage=False")
@@ -247,26 +257,63 @@ class CompositeStagePlan:
         # baseline. The per-site sections keep seeding either way; only consulted
         # with a seed and a stage that pins root.
         self.seed_root = seed_root
+        # When seeding from an existing config, whether that config is also
+        # offered to the searches as a seed candidate (True, the default: it is
+        # measured first and joins the initial population, like a user seed).
+        # False keeps only its pinning role -- the groups a stage does not free
+        # stay at the seed's values -- and builds every stage's population from
+        # the effort profile alone, so re-tuning those groups starts from
+        # scratch instead of being steered towards the existing config.
+        self.seed_search = seed_search
 
     def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
         """The per-stage autotune overrides carried by stage `index`."""
         return self.stage_autotune_kwargs[index]
 
     def free_groups(self, index: int, groups: Sequence[str]) -> dict[str, bool]:
-        """The stage's partition: which of `groups` it searches."""
+        """The stage's partition: which of `groups` it searches.
+
+        Group-level only: the root entry is true when the stage names the whole
+        `"root"` selector, so a stage that frees individual `root.<name>`
+        tunables reads as pinning root here. `free_root_keys` is the authority
+        on root.
+        """
         action, selectors = self.stages[index]
         listed = set(selectors)
         free = action == FREE
         return {group: (group in listed) == free for group in groups}
 
-    def validate(self, site_names: Sequence[str]) -> None:
+    def free_root_keys(self, index: int, root_names: Sequence[str]) -> frozenset[str]:
+        """The root tunables the stage searches.
+
+        `"root"` covers the whole group; `root.<name>` covers the named
+        tunables, and the unnamed ones take the stage's opposite action, like
+        whole groups do. Names the bind does not have are dropped here and
+        reported by `validate`.
+        """
+        action, selectors = self.stages[index]
+        listed = set(selectors)
+        names = set(root_names)
+        if "root" in listed:
+            named = names
+        else:
+            named = {
+                selector.removeprefix("root.")
+                for selector in selectors
+                if selector.startswith("root.")
+            } & names
+        return frozenset(names - named if action == PIN else named)
+
+    def validate(
+        self, site_names: Sequence[str], root_names: Sequence[str] = ()
+    ) -> None:
         """Warn about selectors this bind does not have.
 
         A named site may legitimately be absent -- the body only calls some
         sites under certain root values or input dtypes -- so this reports
         them instead of failing the run.
         """
-        known = {"root", *site_names}
+        known = {"root", *site_names, *(f"root.{name}" for name in root_names)}
         for index, (_, selectors) in enumerate(self.stages, start=1):
             unknown = [name for name in selectors if name not in known]
             if unknown:
@@ -299,6 +346,7 @@ class CompositeStagePlan:
             + ("" if self.final_stage else ", final_stage=False")
             + ("" if self.seed_codegen_shape else ", seed_codegen_shape=False")
             + ("" if self.seed_root else ", seed_root=False")
+            + ("" if self.seed_search else ", seed_search=False")
             + ")"
         )
 
@@ -633,6 +681,11 @@ class CompositeConfigSpec:
         # No knob picks a distinct body at the composite level, which disables
         # the final selection's family quota (read when a budget is set).
         self.final_selection_family_keys: tuple[str, ...] = ()
+
+    @property
+    def root_names(self) -> tuple[str, ...]:
+        """The root tunables' names, i.e. the joint config's `root` section."""
+        return tuple(self._root)
 
     @property
     def sites(self) -> tuple[_Site, ...]:
@@ -1368,6 +1421,7 @@ class CompositeKernel:
         bound: BoundCompositeKernel,
         values: Mapping[str, Any],
         free: Mapping[str, bool],
+        free_root: Collection[str],
         *,
         free_codegen_pins: bool = False,
         follow_section: bool = False,
@@ -1377,7 +1431,10 @@ class CompositeKernel:
     ) -> dict[str, Any]:
         """Freeze every group `free` does not mark free at its known values.
 
-        A free site keeps only its codegen-shape keys pinned (`_STAGE_PINS`),
+        `free_root` names the root tunables this stage searches; the rest stay
+        at their known values, so freeing one knob (`root.swap_ab_1`) leaves the
+        structure the pinned sites were tuned against untouched. A free site
+        keeps only its codegen-shape keys pinned (`_STAGE_PINS`),
         so the stage's compiled-kernel count stays proportional to the primary
         dimensions it explores; a pinned site is frozen over its entire space.
         With `free_codegen_pins` the stage searches `_STAGE_PINS` too: a
@@ -1385,18 +1442,21 @@ class CompositeKernel:
         those keys, matching the implied final stage.
         """
         overrides: dict[str, Any] = {}
-        if not free["root"]:
-            # A pinned root follows the seed-derived values, or the kernel's
-            # default root tunables when seed_root is off -- so a close seed
-            # still speeds the per-site search while a (PIN, "root", ...) stage
-            # stays structural (e.g. default fuse_moe_sum, so its free aux
-            # kernels are exercised rather than pinned to a seed that skips them).
-            root_values = (
-                values["root"] if seed_root or default_root is None else default_root
-            )
-            overrides.update(
-                {f"root.{key}": value for key, value in root_values.items()}
-            )
+        # A pinned root follows the seed-derived values, or the kernel's
+        # default root tunables when seed_root is off -- so a close seed
+        # still speeds the per-site search while a (PIN, "root", ...) stage
+        # stays structural (e.g. default fuse_moe_sum, so its free aux
+        # kernels are exercised rather than pinned to a seed that skips them).
+        root_values = (
+            values["root"] if seed_root or default_root is None else default_root
+        )
+        overrides.update(
+            {
+                f"root.{key}": value
+                for key, value in root_values.items()
+                if key not in free_root
+            }
+        )
         sites = {site.name: site for site in bound.config_spec.sites}
         for name, section in values.get("children", {}).items():
             if free.get(name, True):
@@ -1470,7 +1530,9 @@ class CompositeKernel:
         plan that leaves sites untuned keeps their pre-tuned sections instead of
         the fragment defaults. The caller is expected to have checked that it
         runs on these inputs; one that does not fit this program is reported and
-        ignored, leaving the run identical to an unseeded one.
+        ignored, leaving the run identical to an unseeded one. A plan with
+        `seed_search=False` keeps only the second role: the config supplies the
+        frozen values, but no stage measures it or adds it to its population.
 
         Every candidate is a complete joint config measured by running the
         whole body, so inter-kernel effects are inside the measurement. A case
@@ -1503,11 +1565,17 @@ class CompositeKernel:
         # explores (same-shape inputs share it) and the stage overrides.
         bound = bounds[0]
         plan = self.stage_plan if self.stage_plan is not None else CompositeStagePlan()
-        plan.validate(bound.config_spec.site_names)
+        root_names = bound.config_spec.root_names
+        plan.validate(bound.config_spec.site_names, root_names)
 
         # Latest known values per group: the seed config's (or the spec
         # defaults) until a stage tunes them, the stage winner afterwards.
         values, seed = self._start_values(bound, seed_config)
+        # `seed` carries two roles: the pinned value of every group a stage does
+        # not free, and a candidate the stages measure first. A plan may keep
+        # only the first (`seed_search=False`), so re-tuning the free groups
+        # starts from an empty population.
+        search_seed = seed if plan.seed_search else None
         default_root = _joint_dict(bound.config_spec.default_config()).get("root", {})
         groups = ("root", *bound.config_spec.site_names)
         total_stages = len(plan.stages) + (1 if plan.final_stage else 0)
@@ -1523,13 +1591,14 @@ class CompositeKernel:
                     bound,
                     values,
                     free,
+                    plan.free_root_keys(index, root_names),
                     free_codegen_pins=free_codegen_pins,
                     follow_section=seed is not None,
                     seed_codegen_shape=plan.seed_codegen_shape,
                     seed_root=plan.seed_root,
                     default_root=default_root,
                 ),
-                seed=_stage_seeds(seed, best),
+                seed=_stage_seeds(search_seed, best),
                 autotune_kwargs=plan.autotune_kwargs(index),
             )
             logger.info(
@@ -1548,7 +1617,7 @@ class CompositeKernel:
                 arg_sets,
                 autotune_effort,
                 self._final_overrides(bound, values),
-                seed=_stage_seeds(seed, best),
+                seed=_stage_seeds(search_seed, best),
                 autotune_kwargs=plan.final_autotune_kwargs,
             )
             logger.info(
