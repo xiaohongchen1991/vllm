@@ -500,6 +500,12 @@ def moe_block_mm(
                     # [num_tokens, N] layer output.
                     store_rows = offs_token // top_k
 
+                if apply_weights:
+                    # Masked load: padded lanes' sentinel index is never read.
+                    weight_blk = hl.load(
+                        topk_weights_flat, [offs_token], extra_mask=token_mask
+                    )
+
                 acc = hl.zeros([tile_m, tile_n], torch.float32)
 
                 if fuse_act_quant:
@@ -511,6 +517,8 @@ def moe_block_mm(
                     # Weight tiles never depend on the producing stage: issue
                     # them before the down projection's in-loop wait.
                     w_blk = w[e, tile_n, tile_k]
+                    gk_idx = tile_k.id
+                    w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][None, :]
                     if fuse_act_quant:
                         # Up half, adjusted_N columns past the gate half. The
                         # offset index is masked explicitly: a padded lane of
@@ -521,6 +529,19 @@ def moe_block_mm(
                             [e + hl.arange(1), tile_n.index + adjusted_N, tile_k],
                             extra_mask=(tile_n.index + adjusted_N < N)[None, :, None],
                         ).squeeze(0)
+                        # 1-D index and mask (e and gk_idx are scalars), then
+                        # the same [None, :] promotion as the gate half.
+                        w2_scale_blk = hl.load(
+                            w_scale,
+                            [
+                                e + hl.arange(1),
+                                (tile_n.index + adjusted_N) // group_n,
+                                gk_idx + hl.arange(1),
+                            ],
+                            extra_mask=(
+                                (tile_n.index + adjusted_N) // group_n < num_group_n
+                            )[None, :, None],
+                        ).squeeze(-1)
                     if apply_weights:
                         # Down projection: wait after the weight tile (and after
                         # the routing reads above) but before the activation, so
@@ -532,7 +553,6 @@ def moe_block_mm(
                         aq, [aq_rows, tile_k], extra_mask=token_mask[:, None]
                     )
 
-                    gk_idx = tile_k.id
                     if swap_ab:
                         acc_blk = (
                             hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
@@ -559,21 +579,6 @@ def moe_block_mm(
                         [aq_rows, gk_idx + hl.arange(1)],
                         extra_mask=token_mask[:, None],
                     )
-                    w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][None, :]
-                    if fuse_act_quant:
-                        # 1-D index and mask (e and gk_idx are scalars), then
-                        # the same [None, :] promotion as the gate half.
-                        w2_scale_blk = hl.load(
-                            w_scale,
-                            [
-                                e + hl.arange(1),
-                                (tile_n.index + adjusted_N) // group_n,
-                                gk_idx + hl.arange(1),
-                            ],
-                            extra_mask=(
-                                (tile_n.index + adjusted_N) // group_n < num_group_n
-                            )[None, :, None],
-                        ).squeeze(-1)
 
                     acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
                     if fuse_act_quant:
@@ -622,10 +627,6 @@ def moe_block_mm(
                 # are disjoint K-slices of the same output row, so weighting each
                 # partial equals weighting the total: sum_k(w * P_k) == w * P.
                 if apply_weights:
-                    # Masked load: padded lanes' sentinel index is never read.
-                    weight_blk = hl.load(
-                        topk_weights_flat, [offs_token], extra_mask=token_mask
-                    )
                     acc = acc * weight_blk[:, None]
 
                 if split_k == 1 and not fuse_moe_sum:
