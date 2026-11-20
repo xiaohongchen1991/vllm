@@ -2,14 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hand-written custom baselines for benchmarking Helion kernels.
 
-Each entry in `CUSTOM_BASELINE_FNS` maps a Helion kernel name to a reference
+Each entry in ``CUSTOM_BASELINE_FNS`` maps a Helion kernel name to a reference
 callable sharing that kernel's argument interface, so the kernel's input tuple
-can be forwarded verbatim. These are used as the `custom` performance baseline
-(e.g. by `scripts/benchmark_helion_kernels.py`) to compare a Helion kernel
+can be forwarded verbatim. These are used as the ``custom`` performance baseline
+(e.g. by ``scripts/benchmark_helion_kernels.py``) to compare a Helion kernel
 against a production vLLM op rather than the native-torch autotune reference.
 
 Add a new baseline by defining a function with the kernel's argument interface
-and registering it in `CUSTOM_BASELINE_FNS`.
+and registering it in ``CUSTOM_BASELINE_FNS``.
 """
 
 import weakref
@@ -17,6 +17,34 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 import torch
+
+# mega_moe_block_mm stores weight scales as e8m0 bytes at 32-group K granularity
+# ([E, O // 128, C // 32] uint8). The reference/production baselines want the
+# fp32 [E, O // 128, C // 128] block scale, so decode once per weight tensor and
+# cache by id -- this is load-time weight prep, excluded from the timed region
+# (the first, warmup call fills the cache; timed calls hit it).
+_W_SCALE_FP32_CACHE: dict[int, tuple[weakref.ref, torch.Tensor]] = {}
+
+
+def _w_scale_to_fp32(scale: torch.Tensor) -> torch.Tensor:
+    """Decode an e8m0 `[E, O // 128, C // 32]` uint8 weight scale to fp32
+    `[E, O // 128, C // 128]`, cached by tensor id so the conversion is not timed.
+    """
+    if scale.dtype != torch.uint8:
+        return scale
+    key = id(scale)
+    entry = _W_SCALE_FP32_CACHE.get(key)
+    if entry is not None and entry[0]() is scale:
+        return entry[1]
+    # One byte per 128-block (the four 32-group replicas are identical), decoded
+    # to the fp32 power of two it encodes.
+    coarse = scale[..., ::4].contiguous().to(torch.int32)
+    fp32 = (coarse << 23).view(torch.float32)
+    _W_SCALE_FP32_CACHE[key] = (
+        weakref.ref(scale, lambda _, k=key: _W_SCALE_FP32_CACHE.pop(k, None)),
+        fp32,
+    )
+    return fp32
 
 
 def _block_scaled_mm(
@@ -37,7 +65,7 @@ def _moe_sum(
     topk_ids: torch.Tensor | None = None,  # [num_tokens, top_k] int32
     expert_map: torch.Tensor | None = None,  # [num_experts] int32, -1 = off-rank
 ) -> None:
-    """Production `moe_sum` baseline for the Helion `moe_sum` kernel."""
+    """Production ``moe_sum`` baseline for the Helion ``moe_sum`` kernel."""
     from vllm import _custom_ops as ops
 
     ops.moe_sum(input, output, topk_ids, expert_map)
@@ -59,17 +87,17 @@ def _moe_block_mm(
     workspace2: torch.Tensor,  # bf16 [num_tokens, top_k, N] gate_up cache
 ) -> None:
     """Triton GEMM1 + silu block-quant + weighted GEMM2 + moe_sum baseline for
-    `fused_moe_block_mm`.
+    ``fused_moe_block_mm``.
 
-    Mirrors `TritonExperts.apply`: a single `_prepare_expert_assignment` (and
-    a single `try_get_optimal_moe_config`) feeds both GEMMs. GEMM1 drives
-    `invoke_fused_moe_triton_kernel` over the unpermuted activations to produce
-    the bf16 gate_up projection in routed-row (`offs_token`) order;
-    `silu_and_mul_per_block_quant` folds the gate||up halves into the fp8
+    Mirrors ``TritonExperts.apply``: a single ``_prepare_expert_assignment`` (and
+    a single ``try_get_optimal_moe_config``) feeds both GEMMs. GEMM1 drives
+    ``invoke_fused_moe_triton_kernel`` over the unpermuted activations to produce
+    the bf16 gate_up projection in routed-row (``offs_token``) order;
+    ``silu_and_mul_per_block_quant`` folds the gate||up halves into the fp8
     [routed, intermediate] intermediate + per-128-group scales; GEMM2 reuses the
-    same sorted_token_ids/expert_ids with `top_k = 1` (so `offs_token`
+    same sorted_token_ids/expert_ids with ``top_k = 1`` (so ``offs_token``
     indexes the intermediate directly) and applies the routed weights in its
-    epilogue (`mul_routed_weight`) into workspace13; `moe_sum` reduces the
+    epilogue (``mul_routed_weight``) into workspace13; ``moe_sum`` reduces the
     weighted rows over top_k into the [num_tokens, H] output. Runs on any
     Triton-capable GPU (e.g. SM120).
     """
@@ -196,22 +224,24 @@ def triton_moe_block_mm(
     workspace2: torch.Tensor,  # bf16 [routed, N] gate_up cache
     clamp_limit: float | None = None,  # swiglu_limit of the gated activation
 ) -> None:
-    """Triton full-layer baseline for the composite `mega_moe_block_mm`.
+    """Triton full-layer baseline for the composite ``mega_moe_block_mm``.
 
-    Requires the fp8 input mode (`fp8_input = True` in the input generator):
+    Requires the fp8 input mode (``fp8_input = True`` in the input generator):
     the activation arrives already quantized with its per-128-group scales, as
-    the layer hands it to `TritonExperts` -- unlike the mega kernel, this
+    the layer hands it to ``TritonExperts`` -- unlike the mega kernel, this
     baseline does not quantize an unquantized input itself.
 
-    Mirrors `TritonExperts.apply` end to end: one config and one
-    `_prepare_expert_assignment` feed both GEMMs; GEMM1 writes the bf16
-    gate_up projection in routed-row order; `silu_and_mul_per_block_quant`
+    Mirrors ``TritonExperts.apply`` end to end: one config and one
+    ``_prepare_expert_assignment`` feed both GEMMs; GEMM1 writes the bf16
+    gate_up projection in routed-row order; ``silu_and_mul_per_block_quant``
     produces the fp8 intermediate; GEMM2 applies the routed weights in its
-    epilogue (`mul_routed_weight`) into workspace13; `moe_sum` reduces the
+    epilogue (``mul_routed_weight``) into workspace13; ``moe_sum`` reduces the
     weighted rows over top_k into the [num_tokens, H] output. The gate_up and
     GEMM2 staging buffers are workspace-backed so the timed region allocates
     nothing. Runs on any Triton-capable GPU (e.g. SM120).
     """
+    w1_scale = _w_scale_to_fp32(w1_scale)
+    w2_scale = _w_scale_to_fp32(w2_scale)
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         _prepare_expert_assignment,
@@ -331,12 +361,12 @@ _FI_MIN_BLOCK_SCALE = 1e-10
 
 
 class _FiState(NamedTuple):
-    """Everything `FlashInferExperts` builds before the per-call work.
+    """Everything ``FlashInferExperts`` builds before the per-call work.
 
-    Mirrors the split in `FlashInferExperts`: the weight layout and scale
-    floor come from load time (`convert_to_kernel_format` ->
-    `prepare_fp8_moe_layer_for_fi`), while `ep_size`/`ep_rank` and the
-    per-expert `gemm1_clamp_limit` tensor are `__init__` attributes. None of
+    Mirrors the split in ``FlashInferExperts``: the weight layout and scale
+    floor come from load time (``convert_to_kernel_format`` ->
+    ``prepare_fp8_moe_layer_for_fi``), while ``ep_size``/``ep_rank`` and the
+    per-expert ``gemm1_clamp_limit`` tensor are ``__init__`` attributes. None of
     it is recomputed per request, so the baseline caches it the same way.
     """
 
@@ -363,7 +393,7 @@ def _fi_state(
     global_num_experts: int,
     clamp_limit: float | None,
 ) -> _FiState:
-    """Load-time and init-time state of `FlashInferExperts`."""
+    """Load-time and init-time state of ``FlashInferExperts``."""
     key = (
         id(w2),
         id(w1_scale),
@@ -417,15 +447,15 @@ def _fi_ep_params(
     local_num_experts: int,
     global_num_experts: int,
 ) -> tuple[int, int]:
-    """`(ep_size, ep_rank)` telling FI which expert block this rank owns.
+    """``(ep_size, ep_rank)`` telling FI which expert block this rank owns.
 
-    `topk_ids` stay in the global expert space (the no-dispatch convention of
-    `MoEPrepareAndFinalizeNoDPEPModular`), so the kernel needs the local
-    block's offset instead of an `expert_map` -- it has no expert-map
-    support. vLLM places a rank's experts contiguously, so rank `r` owns
-    `[r * L, (r + 1) * L)`, which is the layout FI assumes. In production
-    this comes from `moe_parallel_config`; here it is read back from
-    `expert_map` once and cached by the caller.
+    ``topk_ids`` stay in the global expert space (the no-dispatch convention of
+    ``MoEPrepareAndFinalizeNoDPEPModular``), so the kernel needs the local
+    block's offset instead of an ``expert_map`` -- it has no expert-map
+    support. vLLM places a rank's experts contiguously, so rank ``r`` owns
+    ``[r * L, (r + 1) * L)``, which is the layout FI assumes. In production
+    this comes from ``moe_parallel_config``; here it is read back from
+    ``expert_map`` once and cached by the caller.
     """
     if expert_map is None:
         assert local_num_experts == global_num_experts
@@ -472,26 +502,28 @@ def flashinfer_moe_block_mm(
     workspace2: torch.Tensor,  # unused
     clamp_limit: float | None = None,  # swiglu_limit of the gated activation
 ) -> None:
-    """FlashInfer CUTLASS full-layer baseline for `mega_moe_block_mm`.
+    """FlashInfer CUTLASS full-layer baseline for ``mega_moe_block_mm``.
 
-    Mirrors `FlashInferExperts.apply`'s `use_deepseek_fp8_block_scale`
-    branch -- `quant_scales=[w1_scale, w2_scale]`, fp8 block-scaled weights,
-    `swiglu_limit` for the clamp, and unquantized activations
-    (`expects_unquantized_inputs`): flashinfer builds the fp8 x fp8 runner
+    Mirrors ``FlashInferExperts.apply``'s ``use_deepseek_fp8_block_scale``
+    branch -- ``quant_scales=[w1_scale, w2_scale]``, fp8 block-scaled weights,
+    ``swiglu_limit`` for the clamp, and unquantized activations
+    (``expects_unquantized_inputs``): flashinfer builds the fp8 x fp8 runner
     only when the block-scale flag is off, and its block-scale runner is a
     bf16 x fp8 kernel that derives the per-128 activation scales itself. So this
-    baseline takes the case's bf16 activations as-is (`fp8_input = False` in
-    the input generator) and passes no `input_sf`; given fp8 activations it
+    baseline takes the case's bf16 activations as-is (``fp8_input = False`` in
+    the input generator) and passes no ``input_sf``; given fp8 activations it
     would fail to construct the runner. The W31 layout swap vLLM performs at
     load time is done on the first call (warmup) and cached.
 
     SM90 only: FlashInfer implements FP8 block scaling for Hopper ("FP8 block
     scaling not yet implemented for Blackwell"). Expert parallelism follows the
-    no-dispatch convention (`MoEPrepareAndFinalizeNoDPEPModular`): `topk_ids`
+    no-dispatch convention (``MoEPrepareAndFinalizeNoDPEPModular``): ``topk_ids``
     stay in the global expert space and the kernel is told which contiguous
-    local block this rank owns through `ep_size`/`ep_rank` -- the same
-    information `expert_map` carries for the Triton path.
+    local block this rank owns through ``ep_size``/``ep_rank`` -- the same
+    information ``expert_map`` carries for the Triton path.
     """
+    w1_scale = _w_scale_to_fp32(w1_scale)
+    w2_scale = _w_scale_to_fp32(w2_scale)
     from vllm.platforms import current_platform
 
     if not current_platform.is_device_capability(90):
@@ -549,9 +581,9 @@ def flashinfer_moe_block_mm(
 class _TrtllmState(NamedTuple):
     """Load-time state of the TRT-LLM FP8 block-scale experts.
 
-    `prepare_fp8_moe_layer_for_fi(is_trtllm=True)` swaps the gate/up halves
+    ``prepare_fp8_moe_layer_for_fi(is_trtllm=True)`` swaps the gate/up halves
     (W31) and shuffles both weights into the BlockMajorK layout once at load
-    time; `ep_rank` and the per-expert clamp tensor are init-time state. None
+    time; ``ep_rank`` and the per-expert clamp tensor are init-time state. None
     of it depends on the request, so the baseline caches it the same way.
     """
 
@@ -640,31 +672,33 @@ def trtllm_moe_block_mm(
     workspace2: torch.Tensor,  # unused
     clamp_limit: float | None = None,  # swiglu_limit of the gated activation
 ) -> None:
-    """TRT-LLM Gen FP8 block-scale baseline for `mega_moe_block_mm`.
+    """TRT-LLM Gen FP8 block-scale baseline for ``mega_moe_block_mm``.
 
-    Follows `TrtLlmFp8ExpertsModular.apply`: hand the kernel the unpacked
-    `(topk_ids, topk_weights)` routing tuple, pass the activation scales
-    through `prepare_deepseek_fp8_x_sf` (fp32, `[K // 128, M]`), and drive
-    `trtllm_fp8_block_scale_routed_moe` with DeepSeek FP8 block
+    Follows ``TrtLlmFp8ExpertsModular.apply``: hand the kernel the unpacked
+    ``(topk_ids, topk_weights)`` routing tuple, pass the activation scales
+    through ``prepare_deepseek_fp8_x_sf`` (fp32, ``[K // 128, M]``), and drive
+    ``trtllm_fp8_block_scale_routed_moe`` with DeepSeek FP8 block
     quantization, BlockMajorK shuffled weights in W31 order, the rank's
-    contiguous expert block through `local_expert_offset`, and the SwiGLU
+    contiguous expert block through ``local_expert_offset``, and the SwiGLU
     clamp as a per-expert tensor. Routing happens upstream, as it does for the
     Helion kernel: the experts align the routed slots and apply the routed
-    weights and the top-k reduction in-kernel (`do_finalize=True`, the
-    non-deferred branch of `apply`). The monolithic class differs only by
+    weights and the top-k reduction in-kernel (``do_finalize=True``, the
+    non-deferred branch of ``apply``). The monolithic class differs only by
     deriving the routing from router logits inside the kernel
-    (`_apply_block_scale`), so it is not the counterpart of this interface.
+    (``_apply_block_scale``), so it is not the counterpart of this interface.
 
-    Requires the fp8 input mode (`fp8_input = True` in the input generator):
+    Requires the fp8 input mode (``fp8_input = True`` in the input generator):
     the TRT-LLM experts take precomputed activation scales and never quantize
     the activation themselves. SM100 (Blackwell) only -- FlashInfer builds its
     TRT-LLM Gen MoE module for that family, and vLLM gates the backend on it --
     so on Hopper this raises instead of falling back; use
-    `flashinfer_moe_block_mm` (CUTLASS) there. The W31 swap, the BlockMajorK
+    ``flashinfer_moe_block_mm`` (CUTLASS) there. The W31 swap, the BlockMajorK
     shuffle and the clamp tensor are the load-time work
-    `process_weights_after_loading` performs for this backend, cached across
-    calls here; only the scale transpose is per-call work, as in `apply`.
+    ``process_weights_after_loading`` performs for this backend, cached across
+    calls here; only the scale transpose is per-call work, as in ``apply``.
     """
+    w1_scale = _w_scale_to_fp32(w1_scale)
+    w2_scale = _w_scale_to_fp32(w2_scale)
     from vllm.platforms import current_platform
 
     if (
