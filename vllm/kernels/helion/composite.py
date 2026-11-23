@@ -225,6 +225,7 @@ class CompositeStagePlan:
         seed_codegen_shape: bool = True,
         seed_root: bool = True,
         seed_search: bool = True,
+        seed_all: bool = False,
     ):
         if not stages and not final_stage:
             raise ValueError("A plan needs at least one stage when final_stage=False")
@@ -265,6 +266,12 @@ class CompositeStagePlan:
         # the effort profile alone, so re-tuning those groups starts from
         # scratch instead of being steered towards the existing config.
         self.seed_search = seed_search
+        # When seeding from an existing config, whether the search starts from
+        # that one config alone (False, the default) or from every config the
+        # kernel's own config file holds for the platform, deduplicated (True).
+        # The config the case routes to today stays the primary: it still
+        # supplies the frozen values, the others only join the population.
+        self.seed_all = seed_all
 
     def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
         """The per-stage autotune overrides carried by stage `index`."""
@@ -347,6 +354,7 @@ class CompositeStagePlan:
             + ("" if self.seed_codegen_shape else ", seed_codegen_shape=False")
             + ("" if self.seed_root else ", seed_root=False")
             + ("" if self.seed_search else ", seed_search=False")
+            + ("" if not self.seed_all else ", seed_all=True")
             + ")"
         )
 
@@ -502,14 +510,30 @@ def _fit_joint_config(
     return fitted, tuple(dropped)
 
 
+def _joint_fingerprint(joint: Mapping[str, Any]) -> str:
+    """A joint config's identity, so the same seed in two entries is used once."""
+    root = repr(sorted(joint.get("root", {}).items()))
+    children = repr(
+        sorted(
+            (name, repr(sorted(section.items())))
+            for name, section in joint.get("children", {}).items()
+        )
+    )
+    return f"{root}\n{children}"
+
+
 def _stage_seeds(
-    seed_config: helion.Config | None, winner: helion.Config | None
+    seed_configs: Sequence[helion.Config] | None,
+    winner: helion.Config | None,
 ) -> helion.Config | list[helion.Config] | None:
-    """A stage's seed configs: the starting config and the previous winner."""
-    seeds = [config for config in (seed_config, winner) if config is not None]
+    """A stage's seed configs: the caller's seeds and the previous winner."""
+    seeds: list[helion.Config] = []
+    for config in (*(seed_configs or ()), *([winner] if winner is not None else [])):
+        if config not in seeds:
+            seeds.append(config)
     if not seeds:
         return None
-    if len(seeds) == 1 or seeds[0] == seeds[1]:
+    if len(seeds) == 1:
         return seeds[0]
     return seeds
 
@@ -1240,30 +1264,93 @@ class CompositeKernel:
         best = search.autotune()
         return best, search.best.perf
 
+    def _seed_joints(
+        self,
+        bound: BoundCompositeKernel,
+        seed_config: Any | None,
+        seed_configs: Sequence[Any] | None,
+    ) -> list[helion.Config]:
+        """Every usable seed config, in priority order and deduplicated.
+
+        The first one is the primary: the config the caller routes this case to,
+        whose values the groups a stage does not free are frozen at. The rest
+        only join each stage's initial population. A seed that does not fit this
+        program is reported (the primary) or skipped quietly (the others).
+        """
+        if seed_configs is not None:
+            candidates = list(seed_configs)
+            if seed_config is not None:
+                candidates.insert(0, seed_config)
+        elif seed_config is not None:
+            candidates = [seed_config]
+        else:
+            return []
+        seeds: list[helion.Config] = []
+        seen: set[str] = set()
+        for index, candidate in enumerate(candidates):
+            try:
+                fitted, _dropped = _fit_joint_config(bound, candidate)
+            except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
+                log = logger.warning if index == 0 else logger.debug
+                log(
+                    "Composite '%s': an existing config does not fit this "
+                    "program (%s: %s); leaving it out of the seed population",
+                    self.name,
+                    type(e).__name__,
+                    str(e).splitlines()[0][:200] if str(e) else "",
+                )
+                continue
+            key = _joint_fingerprint(_joint_dict(fitted))
+            if key in seen:
+                continue
+            seen.add(key)
+            seeds.append(fitted)
+        return seeds
+
     def _start_values(
-        self, bound: BoundCompositeKernel, seed_config: Any | None
+        self, bound: BoundCompositeKernel, seeds: Sequence[helion.Config]
     ) -> tuple[dict[str, Any], helion.Config | None]:
-        """The groups' initial values and the config to seed the stages with."""
+        """The groups' initial values and the primary seed."""
         default = bound.config_spec.default_config()
-        if seed_config is None:
-            return _joint_dict(default), None
-        try:
-            seed, _dropped = _fit_joint_config(bound, seed_config)
-        except Exception as e:  # noqa: BLE001 - an unusable seed is not fatal
-            logger.warning(
-                "Composite '%s': not seeding from the existing config, it does "
-                "not fit this program (%s: %s)",
-                self.name,
-                type(e).__name__,
-                str(e).splitlines()[0][:200] if str(e) else "",
-            )
+        if not seeds:
             return _joint_dict(default), None
         logger.info(
             "Composite '%s': starting from the existing config, untuned sites "
-            "stay pinned to it",
+            "stay pinned to it (%d seed config(s) in the population)",
             self.name,
+            len(seeds),
         )
-        return _joint_dict(seed), seed
+        return _joint_dict(seeds[0]), seeds[0]
+
+    @staticmethod
+    def _project_seeds(
+        seeds: Sequence[helion.Config], overrides: Mapping[str, Any]
+    ) -> list[helion.Config]:
+        """Every seed with the stage's pinned tunables set to their pinned values.
+
+        A stage that freezes a group must not start from a seed tuned under a
+        different value for it, and a seed carrying another branch's sections
+        would not normalize. Projecting first keeps each seed's *free* tunables
+        as the candidate while the pinned ones come from the plan.
+        """
+        projected: list[helion.Config] = []
+        for seed in seeds:
+            joint = _joint_dict(seed)
+            root = dict(joint.get("root", {}))
+            children = {
+                name: dict(section)
+                for name, section in joint.get("children", {}).items()
+            }
+            for key, value in overrides.items():
+                if key.startswith("root."):
+                    root[key.removeprefix("root.")] = value
+                else:
+                    name, option = key[len("children.") :].rsplit(".", 1)
+                    children.setdefault(name, {})[option] = value
+            projected.append(
+                helion.Config.from_dict({"root": root, "children": children})
+            )
+        return projected
 
     def prepare_seed(self, args: tuple[Any, ...], config: Any) -> dict[str, Any] | None:
         """A joint config to start autotuning from, or None if nothing survives.
@@ -1519,6 +1606,7 @@ class CompositeKernel:
         *,
         autotune_effort: str = "quick",
         seed_config: Any | None = None,
+        seed_configs: Sequence[Any] | None = None,
     ) -> helion.Config:
         """Search the joint (root + per-site) space, one stage at a time.
 
@@ -1533,6 +1621,15 @@ class CompositeKernel:
         ignored, leaving the run identical to an unseeded one. A plan with
         `seed_search=False` keeps only the second role: the config supplies the
         frozen values, but no stage measures it or adds it to its population.
+
+        `seed_configs` seeds the population with several configs at once (e.g.
+        every entry of the kernel's config file for the platform, see
+        `CompositeStagePlan.seed_all`). The first one is the primary -- its
+        values are the ones the untuned groups are frozen at -- and each of them
+        is fitted to this program, deduplicated, projected onto every stage's
+        pinned values, and offered to that stage's search. A stage that frees a
+        group therefore starts from those configs' *free* tunables instead of
+        from the effort profile alone.
 
         Every candidate is a complete joint config measured by running the
         whole body, so inter-kernel effects are inside the measurement. A case
@@ -1568,14 +1665,15 @@ class CompositeKernel:
         root_names = bound.config_spec.root_names
         plan.validate(bound.config_spec.site_names, root_names)
 
-        # Latest known values per group: the seed config's (or the spec
+        # Latest known values per group: the primary seed's (or the spec
         # defaults) until a stage tunes them, the stage winner afterwards.
-        values, seed = self._start_values(bound, seed_config)
-        # `seed` carries two roles: the pinned value of every group a stage does
-        # not free, and a candidate the stages measure first. A plan may keep
-        # only the first (`seed_search=False`), so re-tuning the free groups
-        # starts from an empty population.
-        search_seed = seed if plan.seed_search else None
+        seeds = self._seed_joints(bound, seed_config, seed_configs)
+        values, seed = self._start_values(bound, seeds)
+        # Every seed carries two roles: the pinned value of a group a stage does
+        # not free (the primary's, see below) and a candidate the stages measure
+        # first. A plan may keep only the first (`seed_search=False`), so
+        # re-tuning the free groups starts from an empty population.
+        search_seeds = seeds if plan.seed_search else []
         default_root = _joint_dict(bound.config_spec.default_config()).get("root", {})
         groups = ("root", *bound.config_spec.site_names)
         total_stages = len(plan.stages) + (1 if plan.final_stage else 0)
@@ -1583,22 +1681,23 @@ class CompositeKernel:
         for index in range(len(plan.stages)):
             free = plan.free_groups(index, groups)
             free_codegen_pins = not plan.final_stage
+            overrides = self._stage_overrides(
+                bound,
+                values,
+                free,
+                plan.free_root_keys(index, root_names),
+                free_codegen_pins=free_codegen_pins,
+                follow_section=seed is not None,
+                seed_codegen_shape=plan.seed_codegen_shape,
+                seed_root=plan.seed_root,
+                default_root=default_root,
+            )
             best, perf = self._autotune_stage(
                 bounds,
                 arg_sets,
                 autotune_effort,
-                self._stage_overrides(
-                    bound,
-                    values,
-                    free,
-                    plan.free_root_keys(index, root_names),
-                    free_codegen_pins=free_codegen_pins,
-                    follow_section=seed is not None,
-                    seed_codegen_shape=plan.seed_codegen_shape,
-                    seed_root=plan.seed_root,
-                    default_root=default_root,
-                ),
-                seed=_stage_seeds(search_seed, best),
+                overrides,
+                seed=_stage_seeds(self._project_seeds(search_seeds, overrides), best),
                 autotune_kwargs=plan.autotune_kwargs(index),
             )
             logger.info(
@@ -1612,12 +1711,13 @@ class CompositeKernel:
             values = _joint_dict(bound.config_spec.normalized_config(best))
 
         if plan.final_stage:
+            overrides = self._final_overrides(bound, values)
             best, perf = self._autotune_stage(
                 bounds,
                 arg_sets,
                 autotune_effort,
-                self._final_overrides(bound, values),
-                seed=_stage_seeds(search_seed, best),
+                overrides,
+                seed=_stage_seeds(self._project_seeds(search_seeds, overrides), best),
                 autotune_kwargs=plan.final_autotune_kwargs,
             )
             logger.info(

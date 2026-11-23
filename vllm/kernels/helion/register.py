@@ -381,10 +381,12 @@ class HelionKernelWrapper:
         With `autotune_from_existing_config`, the kernel's own pre-tuned config
         for this case seeds the search: it is measured alongside the generated
         candidates and, for a composite, it stays the value of every site the
-        stage plan does not tune.
+        stage plan does not tune. A plan with `seed_all` additionally seeds the
+        search with every other config the platform's file holds, deduplicated
+        and fitted by the composite.
         """
         arg_sets = normalize_arg_sets(inputs)
-        seed = self._existing_config(arg_sets[0])
+        seeds = self._existing_configs(arg_sets[0])
 
         if is_composite_body(self.raw_kernel_func):
             # Composite kernel: search the joint (root tunables + per-call-site
@@ -396,15 +398,17 @@ class HelionKernelWrapper:
                 stage_plan=self.stage_plan,
             )
             return composite.autotune(
-                arg_sets, autotune_effort=autotune_effort, seed_config=seed
+                arg_sets, autotune_effort=autotune_effort, seed_configs=seeds
             )
 
         extra_kwargs = {
             "autotune_effort": autotune_effort,
             "autotune_ignore_errors": True,
         }
-        if seed is not None:
-            extra_kwargs["autotune_seed_configs"] = seed
+        if seeds:
+            extra_kwargs["autotune_seed_configs"] = (
+                seeds[0] if len(seeds) == 1 else seeds
+            )
         autotune_kernel = create_helion_decorated_kernel(
             self.raw_kernel_func, self.helion_settings, extra_kwargs
         )
@@ -469,6 +473,47 @@ class HelionKernelWrapper:
             selected,
         )
         return config
+
+    def _existing_configs(self, args: tuple[Any, ...]) -> list[Config]:
+        """The pre-tuned configs to seed this case's search with.
+
+        The first is the config the kernel routes the case to today, fitted and
+        checked exactly as before -- it is also what the untuned groups are
+        pinned to. With the stage plan's `seed_all`, every other entry of the
+        same platform file follows it as an extra initial-population candidate;
+        the composite fits and deduplicates those itself, since only the primary
+        has to be known to run (it supplies the pinned values).
+        """
+        primary = self._existing_config(args)
+        seeds = [primary] if primary is not None else []
+        if not self.autotune_from_existing_config or not self._seed_all():
+            return seeds
+        try:
+            configured = self.get_configured_op()
+        except (RuntimeError, ValueError):
+            return seeds
+        configs, picker = configured.configs, configured.config_picker
+        if not configs:
+            return seeds
+        selected: CaseKey = CaseKey.default()
+        if picker is not None:
+            try:
+                selected = picker(args, list(configs)) or CaseKey.default()
+            except Exception:  # noqa: BLE001 - unroutable: every entry is a seed
+                selected = CaseKey.default()
+        extra = [config for key, config in configs.items() if key != selected]
+        if not extra:
+            return seeds
+        logger.info(
+            "Seeding autotuning of '%s' with %d more config(s) from its platform file",
+            self.op_name,
+            len(extra),
+        )
+        return [*seeds, *extra]
+
+    def _seed_all(self) -> bool:
+        """Whether every entry of the platform file seeds the search."""
+        return self.stage_plan is not None and self.stage_plan.seed_all
 
     def _config_runs(self, args: tuple[Any, ...], config: Config) -> bool:
         """Whether a single-kernel config compiles and runs on these inputs."""
