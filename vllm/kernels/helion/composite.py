@@ -50,7 +50,11 @@ import helion
 import torch
 from helion.autotuner import LFBOTreeSearch
 from helion.autotuner.benchmark_provider import _MultiShapeAutotuneArgs
-from helion.autotuner.config_fragment import ConfigSpecFragment
+from helion.autotuner.config_fragment import (
+    BooleanFragment,
+    ConfigSpecFragment,
+    PowerOfTwoFragment,
+)
 from helion.autotuner.config_generation import ConfigGeneration
 from helion.autotuner.effort_profile import get_effort_profile
 
@@ -226,6 +230,7 @@ class CompositeStagePlan:
         seed_root: bool = True,
         seed_search: bool = True,
         seed_all: bool = False,
+        survey_root: bool = False,
     ):
         if not stages and not final_stage:
             raise ValueError("A plan needs at least one stage when final_stage=False")
@@ -272,6 +277,12 @@ class CompositeStagePlan:
         # The config the case routes to today stays the primary: it still
         # supplies the frozen values, the others only join the population.
         self.seed_all = seed_all
+        # Whether binding also visits the other branch each root tunable can
+        # take (a boolean flipped, an integer at 1 vs above it) and gives every
+        # site the binding with the longest structure space, so the search can
+        # reach the indexing / eviction entries only those branches have. Costs
+        # one body pass per root tunable at bind time; see `_longest_sites`.
+        self.survey_root = survey_root
 
     def autotune_kwargs(self, index: int) -> Mapping[str, Any]:
         """The per-stage autotune overrides carried by stage `index`."""
@@ -355,6 +366,7 @@ class CompositeStagePlan:
             + ("" if self.seed_root else ", seed_root=False")
             + ("" if self.seed_search else ", seed_search=False")
             + ("" if not self.seed_all else ", seed_all=True")
+            + ("" if not self.survey_root else ", survey_root=True")
             + ")"
         )
 
@@ -510,6 +522,42 @@ def _fit_joint_config(
     return fitted, tuple(dropped)
 
 
+def _site_length(site: _Site) -> int:
+    """How many structure-length entries the site's search space carries."""
+    section = site.spec.default_config().config
+    return sum(len(value) for value in section.values() if isinstance(value, list))
+
+
+def _alternative_root_values(fragment: ConfigSpecFragment) -> list[Any]:
+    """The other branch a root tunable can select, if it has one.
+
+    Only the distinctions the traced body can act on matter: a boolean flips,
+    and an integer switches between 1 and a value above it (`align_block_size`
+    at 1 selects the dense layout, `split_k_*` at 1 the plain store). A value
+    between two alternatives above 1 does not change the code a child compiles.
+    """
+    default = fragment.default()
+    if isinstance(fragment, BooleanFragment):
+        return [not default]
+    if isinstance(fragment, PowerOfTwoFragment):
+        low, high = int(fragment.low), int(fragment.high)
+        if default == 1:
+            return [2] if high >= 2 else []
+        return [1] if low <= 1 else []
+    return []
+
+
+def _alternative_root_combos(
+    fragments: Mapping[str, ConfigSpecFragment],
+) -> list[dict[str, Any]]:
+    """One combination per alternative root value, each flipping a single knob."""
+    return [
+        {name: value}
+        for name, fragment in fragments.items()
+        for value in _alternative_root_values(fragment)
+    ]
+
+
 def _joint_fingerprint(joint: Mapping[str, Any]) -> str:
     """A joint config's identity, so the same seed in two entries is used once."""
     root = repr(sorted(joint.get("root", {}).items()))
@@ -563,8 +611,11 @@ class _BindRun:
     fragment default -- binding only ever sees the default root branch.
     """
 
-    def __init__(self, composite: CompositeKernel):
+    def __init__(
+        self, composite: CompositeKernel, root_values: Mapping[str, Any] | None
+    ):
         self._composite = composite
+        self._root_values = dict(root_values or {})
         self._occurrences: dict[int, int] = {}
         self.sites: list[_Site] = []
         self.root_fragments: dict[str, ConfigSpecFragment] = {}
@@ -572,7 +623,7 @@ class _BindRun:
     def tunable(self, name: str, fragment: ConfigSpecFragment) -> Any:
         self._composite._register_root_tunable(name, fragment)
         self.root_fragments[name] = fragment
-        return fragment.default()
+        return self._root_values.get(name, fragment.default())
 
     def __call__(self, child: Any, *child_args: Any) -> Any:
         if any(
@@ -1155,12 +1206,90 @@ class CompositeKernel:
                 f"types: {type(existing).__name__} vs {type(fragment).__name__}."
             )
 
-    def bind(self, args: tuple[Any, ...]) -> BoundCompositeKernel:
+    def bind(
+        self, args: tuple[Any, ...], *, survey: bool | None = None
+    ) -> BoundCompositeKernel:
         """Bind to concrete args: one body pass at default root values,
-        recording sites and propagating intermediates at default configs."""
-        run = _BindRun(self)
+        recording sites and propagating intermediates at default configs.
+
+        With `survey` (default: the stage plan's `survey_root`) the other branch
+        of each root tunable is bound too and every site keeps the binding with
+        the longest structure space -- see `_longest_sites`.
+        """
+        bound, root_fragments = self._bind_once(args)
+        if survey is None:
+            survey = self.stage_plan is not None and self.stage_plan.survey_root
+        if not survey:
+            return bound
+        return self._longest_sites(args, bound, root_fragments)
+
+    def _bind_once(
+        self,
+        args: tuple[Any, ...],
+        root_values: Mapping[str, Any] | None = None,
+    ) -> tuple[BoundCompositeKernel, dict[str, ConfigSpecFragment]]:
+        """One body pass at `root_values` (default: each tunable's default)."""
+        run = _BindRun(self, root_values)
         self.body(run, *args)
-        return BoundCompositeKernel(self, args, run.sites, run.root_fragments)
+        bound = BoundCompositeKernel(self, args, run.sites, run.root_fragments)
+        return bound, run.root_fragments
+
+    def _longest_sites(
+        self,
+        args: tuple[Any, ...],
+        bound: BoundCompositeKernel,
+        root_fragments: Mapping[str, ConfigSpecFragment],
+    ) -> BoundCompositeKernel:
+        """Give every site the binding with the longest structure space.
+
+        A child kernel's structure-length lists (`indexing`, eviction policies,
+        `range_*`) are fixed when the body traces it, and the body traces each
+        root tunable at its default. A root value that selects another branch
+        can add memory operations, and a search built on the default trace could
+        never propose entries for them. So each alternative root value is bound
+        once (one at a time -- the branch couplings this kernel has are already
+        implied by the atomic flips, e.g. a split-K flip also turns the fused
+        epilogue off) and the longest binding per site wins. `_ConfiguredRun`
+        truncates a section to the site's actual structure at run time, so the
+        extra entries are inert wherever a branch has fewer operations.
+        """
+        best = {site.name: site for site in bound.sites}
+        best_length = {name: _site_length(site) for name, site in best.items()}
+        default_length = dict(best_length)
+        order = [site.name for site in bound.sites]
+        widened: dict[str, list[int]] = {}
+        for combo in _alternative_root_combos(root_fragments):
+            try:
+                alternative, _ = self._bind_once(args, combo)
+            except Exception as e:  # noqa: BLE001 - an invalid branch is fine
+                logger.debug(
+                    "Composite '%s': root values %s do not bind (%s: %s)",
+                    self.name,
+                    combo,
+                    type(e).__name__,
+                    str(e).splitlines()[0][:200] if str(e) else "",
+                )
+                continue
+            for site in alternative.sites:
+                length = _site_length(site)
+                if length <= best_length.get(site.name, -1):
+                    continue
+                best[site.name] = site
+                best_length[site.name] = length
+                widened[site.name] = [default_length.get(site.name, 0), length]
+                if site.name not in order:
+                    order.append(site.name)
+        if not widened:
+            return bound
+        logger.info(
+            "Composite '%s': widened %d site space(s) to the longest root branch: %s",
+            self.name,
+            len(widened),
+            {name: span for name, span in sorted(widened.items())},
+        )
+        return BoundCompositeKernel(
+            self, args, [best[name] for name in order], root_fragments
+        )
 
     def configure(self, joint_config: dict[str, Any] | None) -> Callable[..., Any]:
         """Return a runner executing the body with a fixed joint config."""
