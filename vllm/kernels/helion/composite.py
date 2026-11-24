@@ -53,6 +53,7 @@ from helion.autotuner.benchmark_provider import _MultiShapeAutotuneArgs
 from helion.autotuner.config_fragment import (
     BooleanFragment,
     ConfigSpecFragment,
+    EnumFragment,
     PowerOfTwoFragment,
 )
 from helion.autotuner.config_generation import ConfigGeneration
@@ -544,6 +545,22 @@ def _alternative_root_values(fragment: ConfigSpecFragment) -> list[Any]:
         if default == 1:
             return [2] if high >= 2 else []
         return [1] if low <= 1 else []
+    if isinstance(fragment, EnumFragment):
+        # A choice set may include a sentinel-style 0 (e.g. "one block per
+        # expert"); bind one representative per other structural class (0, 1,
+        # or anything above 1, which traces the same body).
+        def klass(value: object) -> object:
+            return value if value in (0, 1) else 2
+
+        seen = {klass(default)}
+        alternatives: list[Any] = []
+        for choice in fragment.choices:
+            group = klass(choice)
+            if group in seen:
+                continue
+            seen.add(group)
+            alternatives.append(choice)
+        return alternatives
     return []
 
 

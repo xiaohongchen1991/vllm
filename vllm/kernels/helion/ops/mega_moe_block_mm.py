@@ -93,7 +93,7 @@ if not has_helion():
 import helion
 import helion.language as hl
 from helion._testing import assert_close_with_mismatch_tolerance
-from helion.autotuner import BooleanFragment, PowerOfTwoFragment
+from helion.autotuner import BooleanFragment, EnumFragment, PowerOfTwoFragment
 
 from vllm import _custom_ops as ops
 from vllm.kernels.helion.composite import FREE, PIN, CompositeStagePlan
@@ -209,15 +209,19 @@ STAGE_PLAN = CompositeStagePlan(
 def _align_sizes(
     num_tokens: int, top_k: int, local_num_experts: int, align_block_size: int
 ) -> tuple[int, int]:
-    """Worst-case aligned-layout sizes for the compact routing.
+    """Worst-case layout sizes for the compact routing.
 
     Only local experts can receive slots -- off-rank slots get no block -- so
-    the layout pads at most `min(local_num_experts, numel)` experts to
+    the aligned layout pads at most `min(local_num_experts, numel)` experts to
     `align_block_size` rows: `numel * align_block_size` while there are
     fewer slots than local experts, and `numel + local_num_experts *
-    (align_block_size - 1)` after that.
+    (align_block_size - 1)` after that. The packed layout
+    (`align_block_size == 0`) has one block per local expert and no padding, so
+    it is exactly `numel` rows in `local_num_experts` blocks.
     """
     numel = num_tokens * top_k
+    if align_block_size == 0:
+        return numel, local_num_experts
     if numel < local_num_experts:
         max_padded = numel * align_block_size
     else:
@@ -246,10 +250,10 @@ def moe_block_mm(
     w: torch.Tensor,  # [E, N, K] fp8
     w_scale: torch.Tensor,  # [E, N // 128, K // 128]
     sorted_token_ids: torch.Tensor | None,  # align output, int32; None = dense layout
-    expert_ids: torch.Tensor,  # align output, int32
+    expert_ids: torch.Tensor | None,  # align output, int32; None = packed layout
     num_tokens: int,
     top_k: int,  # real model top_k (routed experts per token)
-    align_block_size: hl.constexpr,  # align block size: routed rows per aligned block
+    align_block_size: hl.constexpr,  # rows per aligned block; 0 = one block per expert
     split_k: hl.constexpr,
     num_tokens_post_padded: torch.Tensor,  # [1] int32: padded routed-slot count
     topk_weights: torch.Tensor | None = None,  # [num_tokens, top_k] routed weights
@@ -261,6 +265,13 @@ def moe_block_mm(
     # tunable so the branch resolves at trace time: only the selected orientation
     # is traced.
     swap_ab: hl.constexpr = False,
+    # [num_local_experts + 1] int32: packed layout only, the experts' exclusive
+    # row offsets (`block_offset[e + 1] - block_offset[e]` is expert e's count).
+    block_offset: torch.Tensor | None = None,
+    # Expert-major intermediate: the gate_up writes the block's packed rows and
+    # the down projection reads them back. An input rather than a tunable so the
+    # branch resolves at trace time.
+    permuted: hl.constexpr = False,
 ) -> None:
     M, K = aq.shape
     E, N = w.shape[0], w.shape[1]
@@ -308,14 +319,14 @@ def moe_block_mm(
     assert num_tokens >= 1
     assert top_k >= 1
 
-    # Permuted intermediate (block_base is not None): the gate_up projection
-    # (topk_weights is None) writes its output to the block's packed rows and
-    # the down projection reads them back. A block's lanes are one expert's
-    # consecutive ranks, so lane i of block b is row `block_base[b] + i` -- no
-    # per-slot map. The activations the gate_up reads stay the caller's
-    # token-order rows, and the down projection scatters its weighted output to
-    # the routed slots' token-order rows, so the combine is a contiguous
-    # moe_sum.
+    # Permuted intermediate: the gate_up projection (topk_weights is None)
+    # writes its output to the block's packed rows and the down projection reads
+    # them back. A block's lanes are one expert's consecutive ranks, so lane i
+    # of block b is row `block_base[b] + i` -- or just the packed row itself when
+    # every expert is one block. The activations the gate_up reads stay the
+    # caller's token-order rows, and the down projection scatters its weighted
+    # output to the routed slots' token-order rows, so the combine is a
+    # contiguous moe_sum.
     if block_base is not None:
         assert block_base.ndim == 1
         # One base row per aligned block, the grid the down projection prunes.
@@ -336,8 +347,9 @@ def moe_block_mm(
         assert topk_weights_flat.numel() == routed
         assert topk_weights_flat.dtype.is_floating_point
 
-    assert expert_ids.ndim == 1
-    assert expert_ids.dtype == torch.int32
+    if expert_ids is not None:
+        assert expert_ids.ndim == 1
+        assert expert_ids.dtype == torch.int32
     if sorted_token_ids is not None:
         assert sorted_token_ids.ndim == 1
         assert sorted_token_ids.dtype == torch.int32
@@ -373,26 +385,44 @@ def moe_block_mm(
     acc_dtype = torch.float32 if aq.is_floating_point() else torch.int32
     out_dtype = output.dtype
 
-    # Routing contract: the caller aligned at block_size = align_block_size (passed
-    # in and specialized), so each aligned block holds routed rows of exactly
-    # one expert (real rows at the head, padding after) and expert_ids holds
-    # the active experts in ascending order followed by a -1 tail. The grid
-    # covers the worst-case buffers (num_blocks = expert_ids.size(0), the
+    # Routing contract -- aligned layout (`align_block_size > 0`): the caller
+    # aligned at that block size, so each aligned block holds routed rows of
+    # exactly one expert (real rows at the head, padding after) and expert_ids
+    # holds the active experts in ascending order followed by a -1 tail. The
+    # grid covers the worst-case buffers (num_blocks = expert_ids.size(0), the
     # tight host-computable bound); num_tokens_post_padded, the actual
-    # per-batch count, stays on device -- the -1 tail already skips the
-    # beyond-count blocks, and the count gates the zero-fill branch.
-    # sorted_token_ids=None selects the dense layout instead
+    # per-batch count, stays on device -- the count gates the zero-fill branch.
+    # `sorted_token_ids=None` selects the dense layout instead
     # (Triton fused_moe's naive_block_assignment): block b is routed slot b
     # with no padding, the slot mapping is derived in-kernel, and expert_ids is
     # the caller's flat topk_ids view.
-    if sorted_token_ids is None:
-        assert align_block_size == 1
+    #
+    # Packed layout (`align_block_size == 0`): one block per local expert, the
+    # expert's rows dense from `block_offset[e]`, and no expert_ids at all (the
+    # block index is the local expert). The grid is then exactly the experts.
+    packed = align_block_size == 0
+    if packed:
+        assert block_offset is not None
+        assert block_offset.numel() == E + 1
+        assert expert_ids is None
+        assert sorted_token_ids is not None
+        num_blocks = E
         max_padded = routed
     else:
-        max_padded = sorted_token_ids.size(0)
-    num_blocks = expert_ids.size(0)
-    assert num_blocks <= routed
-    assert num_blocks * align_block_size >= max_padded
+        assert block_offset is None
+        assert expert_ids is not None
+        if sorted_token_ids is None:
+            assert align_block_size == 1
+            max_padded = routed
+        else:
+            max_padded = sorted_token_ids.size(0)
+        num_blocks = expert_ids.size(0)
+        assert num_blocks <= routed
+        assert num_blocks * align_block_size >= max_padded
+    if permuted:
+        # The packed layout's rows already are the expert-major rows; the
+        # aligned layout needs the per-block packed base row.
+        assert packed or block_base is not None
 
     k_block_size = helion.next_power_of_2(helion.cdiv(K, split_k))
     # split_k partials and the fused moe_sum store both accumulate, so both
@@ -422,17 +452,18 @@ def moe_block_mm(
     qtype_min = -qtype_max
     min_scaling_factor = 1.0 / (qtype_max * 512.0)
 
-    m_block_size = hl.register_block_size(align_block_size)
+    m_block_size = hl.register_block_size(num_tokens)
     n_block_size = hl.register_block_size(min_n_block_size, adjusted_N)
 
     # Grid-dependency waits are inlined inside the tile loop instead of using
     # ``hl.pdl_wait`` at entry, because the down projection must issue its
     # weight tile before waiting while the gate_up projection must wait before
     # its first read. Both variants therefore need the same kernel and only the
-    # exit release at the end keeps ``launch_pdl`` set.
-    for tile_e, tile_m, tile_n, outer_k in hl.tile(
-        [num_blocks, align_block_size, adjusted_N, K],
-        block_size=[1, m_block_size, n_block_size, k_block_size],
+    # exit release at the end keeps ``launch_pdl`` set. They stay outside the M
+    # loop below: one wait (or release) per program, not per row tile.
+    for tile_e, tile_n, outer_k in hl.tile(
+        [num_blocks, adjusted_N, K],
+        block_size=[1, n_block_size, k_block_size],
     ):
         if not apply_weights:
             # Gate_up: every read below (routing ids, counts, weights and
@@ -450,236 +481,267 @@ def moe_block_mm(
         ntp = num_tokens_post_padded[0]
 
         if blk * align_block_size < ntp:
-            e = expert_ids[blk]
-            rows = blk * align_block_size + tile_m.index
-            # The M tile may overshoot the block: ``allow_overshoot`` lets the
-            # autotuner pick m_block_size > align_block_size, since a block
-            # larger than the dimension can map to a more efficient MMA tile.
-            # The lanes past the block are the next block's rows, so they must
-            # not be read, stored or atomically added here -- the implicit
-            # tile-bound mask covers plain loads and stores, but not the
-            # hand-masked atomic below.
-            lane_mask = tile_m.index < align_block_size
-            if sorted_token_ids is None:
-                # Dense layout: block b is routed slot b, derived
-                # arithmetically -- no sorted-ids load, no padding.
-                offs_token = rows
-                token_mask = lane_mask & (rows < routed)
+            # One block per aligned block of `align_block_size` rows -- or, in
+            # the packed layout (`align_block_size == 0`), one block per local
+            # expert, whose row count comes from `block_offset`. Both the
+            # expert id and the row extent are block-level, so they are read
+            # once per program; the M loop walks the block's rows
+            # `m_block_size` at a time.
+            if align_block_size == 0:
+                e = blk
+                rows_in_block = block_offset[blk + 1] - block_offset[blk]
             else:
-                row_mask = lane_mask & (rows < max_padded)
-                offs_token = hl.load(sorted_token_ids, [rows], extra_mask=row_mask)
-                token_mask = row_mask & (offs_token < routed)
-
-            if e >= 0:
-                # The permuted split keys on block_base's presence: None
-                # checks resolve at trace time, so only the taken layout is
-                # traced and the compiled code has no branch on the mode at all.
-                if block_base is not None:
-                    # The intermediate lives on the block's packed rows: lane i
-                    # of block b is row `block_base[b] + i`. The gate_up reads
-                    # the caller's token-order activations and writes there; the
-                    # down projection reads there and lands on the routed slot's
-                    # token-order row, so the combine stays a contiguous
-                    # moe_sum. Padded lanes are masked by the sorted-ids
-                    # sentinel, so their out-of-range row is never dereferenced.
-                    permuted_rows = block_base[blk] + tile_m.index
-                    aq_rows = (
-                        permuted_rows if apply_weights else offs_token // slots_per_row
-                    )
-                    store_rows = offs_token if apply_weights else permuted_rows
+                e = expert_ids[blk]
+                rows_in_block = align_block_size
+            for tile_m in hl.tile(rows_in_block, block_size=m_block_size):
+                # The M tile may overshoot the rows it covers: the aligned
+                # layout lets ``allow_overshoot`` pick m_block_size >
+                # align_block_size, and a packed block's last tile is short.
+                # Lanes past the block are the next block's rows, so they must
+                # not be read, stored or atomically added here -- the implicit
+                # tile-bound mask covers plain loads and stores, but not the
+                # hand-masked atomic below.
+                lane_mask = tile_m.index < rows_in_block
+                if align_block_size:
+                    rows = blk * align_block_size + tile_m.index
+                    if sorted_token_ids is None:
+                        # Dense layout: block b is routed slot b, derived
+                        # arithmetically -- no sorted-ids load, no padding.
+                        offs_token = rows
+                        token_mask = lane_mask & (rows < routed)
+                    else:
+                        row_mask = lane_mask & (rows < max_padded)
+                        offs_token = hl.load(
+                            sorted_token_ids, [rows], extra_mask=row_mask
+                        )
+                        token_mask = row_mask & (offs_token < routed)
                 else:
-                    # Routed slot offs_token reads activation row offs_token //
-                    # slots_per_row (the token's row for the per-token gate_up
-                    # layout; the identity for per-slot activations) and writes
-                    # output row offs_token. Its loads are masked too, so the
-                    # padded lanes' sentinel index is never dereferenced.
-                    aq_rows = offs_token // slots_per_row
-                    store_rows = offs_token
+                    # Packed layout: the expert's rows are dense, so a row is
+                    # its offset plus the lane -- no sentinel, and every lane
+                    # below the count is an on-rank slot.
+                    rows = block_offset[blk] + tile_m.index
+                    offs_token = hl.load(sorted_token_ids, [rows], extra_mask=lane_mask)
+                    token_mask = lane_mask
 
-                if fuse_moe_sum:
-                    # The combine target is the token's row in the
-                    # [num_tokens, N] layer output.
-                    store_rows = offs_token // top_k
+                if e >= 0:
+                    # Whether the intermediate is expert-major (`permuted`)
+                    # resolves at trace time, so only the taken layout is traced.
+                    if permuted:
+                        # Lane i of the block is row `rows`: the packed layout's
+                        # rows are already the expert-major rows, the aligned
+                        # layout starts them at the block's packed base. The
+                        # gate_up reads the caller's token-order activations and
+                        # writes there; the down projection reads there and
+                        # lands on the routed slot's token-order row, so the
+                        # combine stays a contiguous moe_sum.
+                        if align_block_size == 0:
+                            permuted_rows = rows
+                        else:
+                            permuted_rows = block_base[blk] + tile_m.index
+                        aq_rows = (
+                            permuted_rows
+                            if apply_weights
+                            else offs_token // slots_per_row
+                        )
+                        store_rows = offs_token if apply_weights else permuted_rows
+                    else:
+                        # Routed slot offs_token reads activation row offs_token
+                        # // slots_per_row (the token's row for the per-token
+                        # gate_up layout; the identity for per-slot activations)
+                        # and writes output row offs_token.
+                        aq_rows = offs_token // slots_per_row
+                        store_rows = offs_token
 
-                if apply_weights:
-                    # Masked load: padded lanes' sentinel index is never read.
-                    weight_blk = hl.load(
-                        topk_weights_flat, [offs_token], extra_mask=token_mask
-                    )
+                    if fuse_moe_sum:
+                        # The combine target is the token's row in the
+                        # [num_tokens, N] layer output.
+                        store_rows = offs_token // top_k
 
-                acc = hl.zeros([tile_m, tile_n], torch.float32)
-
-                if fuse_act_quant:
-                    acc2 = hl.zeros([tile_m, tile_n], torch.float32)
-
-                # Keep block_size = group_k for the K dimension so the block scale
-                # is constant across each inner tile.
-                for tile_k in hl.tile(outer_k.begin, outer_k.end, block_size=group_k):
-                    # Weight tiles never depend on the producing stage: issue
-                    # them before the down projection's in-loop wait.
-                    w_blk = w[e, tile_n, tile_k]
-                    gk_idx = tile_k.id
-                    w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][None, :]
-                    if fuse_act_quant:
-                        # Up half, adjusted_N columns past the gate half. The
-                        # offset index is masked explicitly: a padded lane of
-                        # the last n tile (tile_n.index >= adjusted_N) would
-                        # otherwise read at or past N.
-                        w2_blk = hl.load(
-                            w,
-                            [e + hl.arange(1), tile_n.index + adjusted_N, tile_k],
-                            extra_mask=(tile_n.index + adjusted_N < N)[None, :, None],
-                        ).squeeze(0)
-                        # 1-D index and mask (e and gk_idx are scalars), then
-                        # the same [None, :] promotion as the gate half.
-                        w2_scale_blk = hl.load(
-                            w_scale,
-                            [
-                                e + hl.arange(1),
-                                (tile_n.index + adjusted_N) // group_n,
-                                gk_idx + hl.arange(1),
-                            ],
-                            extra_mask=(
-                                (tile_n.index + adjusted_N) // group_n < num_group_n
-                            )[None, :, None],
-                        ).squeeze(-1)
                     if apply_weights:
-                        # Down projection: wait after the weight tile (and after
-                        # the routing reads above) but before the activation, so
-                        # the prefetch overlaps the preceding stage's tail.
-                        hl.inline_triton(
-                            "tl.extra.cuda.gdc_wait()", args=(), output_like=None
+                        # Masked load: padded lanes' sentinel index is never read.
+                        weight_blk = hl.load(
+                            topk_weights_flat, [offs_token], extra_mask=token_mask
                         )
-                    aq_blk = hl.load(
-                        aq, [aq_rows, tile_k], extra_mask=token_mask[:, None]
-                    )
 
-                    if swap_ab:
-                        acc_blk = (
-                            hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
-                            .t()
-                            .to(torch.float32)
-                        )
+                    acc = hl.zeros([tile_m, tile_n], torch.float32)
+
+                    if fuse_act_quant:
+                        acc2 = hl.zeros([tile_m, tile_n], torch.float32)
+
+                    # Keep block_size = group_k for the K dimension so the block scale
+                    # is constant across each inner tile.
+                    for tile_k in hl.tile(
+                        outer_k.begin, outer_k.end, block_size=group_k
+                    ):
+                        # Weight tiles never depend on the producing stage: issue
+                        # them before the down projection's in-loop wait.
+                        w_blk = w[e, tile_n, tile_k]
+                        gk_idx = tile_k.id
+                        w_scale_blk = w_scale[e, tile_n.index // group_n, gk_idx][
+                            None, :
+                        ]
                         if fuse_act_quant:
-                            acc2_blk = (
-                                hl.dot(w2_blk, aq_blk.t(), out_dtype=acc_dtype)
+                            # Up half, adjusted_N columns past the gate half. The
+                            # offset index is masked explicitly: a padded lane of
+                            # the last n tile (tile_n.index >= adjusted_N) would
+                            # otherwise read at or past N.
+                            w2_blk = hl.load(
+                                w,
+                                [e + hl.arange(1), tile_n.index + adjusted_N, tile_k],
+                                extra_mask=(tile_n.index + adjusted_N < N)[
+                                    None, :, None
+                                ],
+                            ).squeeze(0)
+                            # 1-D index and mask (e and gk_idx are scalars), then
+                            # the same [None, :] promotion as the gate half.
+                            w2_scale_blk = hl.load(
+                                w_scale,
+                                [
+                                    e + hl.arange(1),
+                                    (tile_n.index + adjusted_N) // group_n,
+                                    gk_idx + hl.arange(1),
+                                ],
+                                extra_mask=(
+                                    (tile_n.index + adjusted_N) // group_n < num_group_n
+                                )[None, :, None],
+                            ).squeeze(-1)
+                        if apply_weights:
+                            # Down projection: wait after the weight tile (and after
+                            # the routing reads above) but before the activation, so
+                            # the prefetch overlaps the preceding stage's tail.
+                            hl.inline_triton(
+                                "tl.extra.cuda.gdc_wait()", args=(), output_like=None
+                            )
+                        aq_blk = hl.load(
+                            aq, [aq_rows, tile_k], extra_mask=token_mask[:, None]
+                        )
+
+                        if swap_ab:
+                            acc_blk = (
+                                hl.dot(w_blk, aq_blk.t(), out_dtype=acc_dtype)
                                 .t()
                                 .to(torch.float32)
                             )
-                    else:
-                        acc_blk = hl.dot(aq_blk, w_blk.t(), out_dtype=acc_dtype).to(
-                            torch.float32
+                            if fuse_act_quant:
+                                acc2_blk = (
+                                    hl.dot(w2_blk, aq_blk.t(), out_dtype=acc_dtype)
+                                    .t()
+                                    .to(torch.float32)
+                                )
+                        else:
+                            acc_blk = hl.dot(aq_blk, w_blk.t(), out_dtype=acc_dtype).to(
+                                torch.float32
+                            )
+                            if fuse_act_quant:
+                                acc2_blk = hl.dot(
+                                    aq_blk, w2_blk.t(), out_dtype=acc_dtype
+                                ).to(torch.float32)
+
+                        aq_scale_blk = hl.load(
+                            aq_scale,
+                            [aq_rows, gk_idx + hl.arange(1)],
+                            extra_mask=token_mask[:, None],
                         )
+
+                        acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
                         if fuse_act_quant:
-                            acc2_blk = hl.dot(
-                                aq_blk, w2_blk.t(), out_dtype=acc_dtype
-                            ).to(torch.float32)
+                            acc2 = acc2 + (aq_scale_blk * w2_scale_blk) * acc2_blk
 
-                    aq_scale_blk = hl.load(
-                        aq_scale,
-                        [aq_rows, gk_idx + hl.arange(1)],
-                        extra_mask=token_mask[:, None],
-                    )
-
-                    acc = acc + (aq_scale_blk * w_scale_blk) * acc_blk
                     if fuse_act_quant:
-                        acc2 = acc2 + (aq_scale_blk * w2_scale_blk) * acc2_blk
-
-                if fuse_act_quant:
-                    # silu(gate) * up, then per-128-group fp8 quantization --
-                    # the epilogue form of ops.silu_and_mul_per_block_quant
-                    # (scale = amax / 448 clamped, q = act / scale, RN cast).
-                    # act is [tile_m, n_block_size] with n_block_size a power
-                    # of two >= 128, so the grouped reshape yields one 128-wide
-                    # group per (row, group) pair and the reduction keeps that
-                    # [tile_m, groups] shape.
-                    if clamp_limit is None:
-                        act = acc * torch.sigmoid(acc) * acc2
-                    else:
-                        # MoEActivation.SILU with a swiglu_limit, as
-                        # swiglu_limit_func applies it: the gate is clamped from
-                        # above only, the up half symmetrically, and both before
-                        # the nonlinearity so the group scale quantizes the
-                        # clamped activation.
-                        gate = torch.clamp_max(acc, clamp_limit)
-                        act = (
-                            gate
-                            * torch.sigmoid(gate)
-                            * torch.clamp(acc2, -clamp_limit, clamp_limit)
+                        # silu(gate) * up, then per-128-group fp8 quantization --
+                        # the epilogue form of ops.silu_and_mul_per_block_quant
+                        # (scale = amax / 448 clamped, q = act / scale, RN cast).
+                        # act is [tile_m, n_block_size] with n_block_size a power
+                        # of two >= 128, so the grouped reshape yields one 128-wide
+                        # group per (row, group) pair and the reduction keeps that
+                        # [tile_m, groups] shape.
+                        if clamp_limit is None:
+                            act = acc * torch.sigmoid(acc) * acc2
+                        else:
+                            # MoEActivation.SILU with a swiglu_limit, as
+                            # swiglu_limit_func applies it: the gate is clamped from
+                            # above only, the up half symmetrically, and both before
+                            # the nonlinearity so the group scale quantizes the
+                            # clamped activation.
+                            gate = torch.clamp_max(acc, clamp_limit)
+                            act = (
+                                gate
+                                * torch.sigmoid(gate)
+                                * torch.clamp(acc2, -clamp_limit, clamp_limit)
+                            )
+                        num_group_tile = n_block_size // 128
+                        act_grouped = act.reshape(m_block_size, num_group_tile, 128)
+                        s = torch.amax(torch.abs(act_grouped), dim=-1).to(torch.float32)
+                        s = (s * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
+                        q = (act_grouped / s[:, :, None]).clamp(qtype_min, qtype_max)
+                        acc = q.reshape(act.shape)
+                        group_idx = tile_n.begin // 128 + hl.arange(num_group_tile)
+                        hl.store(
+                            output_scale,
+                            [store_rows, group_idx],
+                            s,
+                            extra_mask=token_mask[:, None]
+                            & (group_idx < (adjusted_N // 128))[None, :],
                         )
-                    num_group_tile = n_block_size // 128
-                    act_grouped = act.reshape(m_block_size, num_group_tile, 128)
-                    s = torch.amax(torch.abs(act_grouped), dim=-1).to(torch.float32)
-                    s = (s * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
-                    q = (act_grouped / s[:, :, None]).clamp(qtype_min, qtype_max)
-                    acc = q.reshape(act.shape)
-                    group_idx = tile_n.begin // 128 + hl.arange(num_group_tile)
-                    hl.store(
-                        output_scale,
-                        [store_rows, group_idx],
-                        s,
-                        extra_mask=token_mask[:, None]
-                        & (group_idx < (adjusted_N // 128))[None, :],
-                    )
 
-                # Routed weight per output row (Triton's mul_routed_weight),
-                # indexed by the routed slot (aq_rows would be wrong in the
-                # permuted layout, where it holds permuted rows). Split-K partials
-                # are disjoint K-slices of the same output row, so weighting each
-                # partial equals weighting the total: sum_k(w * P_k) == w * P.
-                if apply_weights:
-                    acc = acc * weight_blk[:, None]
+                    # Routed weight per output row (Triton's mul_routed_weight),
+                    # indexed by the routed slot (aq_rows would be wrong in the
+                    # permuted layout, where it holds permuted rows). Split-K partials
+                    # are disjoint K-slices of the same output row, so weighting each
+                    # partial equals weighting the total: sum_k(w * P_k) == w * P.
+                    if apply_weights:
+                        acc = acc * weight_blk[:, None]
 
-                if split_k == 1 and not fuse_moe_sum:
+                    if split_k == 1 and not fuse_moe_sum:
+                        hl.store(
+                            output,
+                            [store_rows, tile_n],
+                            acc.to(out_dtype),
+                            extra_mask=token_mask[:, None],
+                        )
+                    else:
+                        # Atomic accumulate: split-K partials are disjoint K-slices
+                        # of the same output row, and the folded top_k combine
+                        # (fuse_moe_sum) lands several rows on one token, so both
+                        # need read-modify-write (the output was pre-zeroed above).
+                        # Masked lanes must not be issued at all: their index is the
+                        # padding sentinel, which is one row past the output, and
+                        # redirecting them to a valid row (the previous
+                        # ``torch.where(..., 0)``) serializes every padded lane of
+                        # every block on one address. ``hl.atomic_add`` has no mask
+                        # parameter, so emit the Triton atomic directly -- it masks
+                        # the address, not just the value.
+                        hl.inline_triton(
+                            _MASKED_ATOMIC_ADD,
+                            args={
+                                "p": output,
+                                "r": store_rows * N,  # element row offset
+                                "n": tile_n.index,
+                                "v": acc.to(out_dtype),
+                                "m": token_mask[:, None],
+                            },
+                            output_like=None,
+                        )
+                elif apply_weights and split_k == 1 and not fuse_moe_sum:
+                    # Only the store row is needed here: the down projection always
+                    # writes the routed slot's token-order row (both layouts), and no
+                    # activation is gathered.
+                    store_rows = offs_token
+
+                    # Off-rank block inside the actual count: zero its output rows
+                    # (Triton's write_zeros_to_output) so a combine that reads every
+                    # slot sees defined zeros. Both callers now route compactly
+                    # (off-rank slots get no block), so this only fires for a
+                    # layout that keeps them; blocks beyond the count are excluded
+                    # either way, their rows being padding markers. split_k > 1
+                    # pre-zeroes the whole output, and the fused combine skips
+                    # this too: an atomic zero-contribution would be a no-op.
                     hl.store(
                         output,
                         [store_rows, tile_n],
-                        acc.to(out_dtype),
+                        hl.zeros([tile_m, tile_n], out_dtype),
                         extra_mask=token_mask[:, None],
                     )
-                else:
-                    # Atomic accumulate: split-K partials are disjoint K-slices
-                    # of the same output row, and the folded top_k combine
-                    # (fuse_moe_sum) lands several rows on one token, so both
-                    # need read-modify-write (the output was pre-zeroed above).
-                    # Masked lanes must not be issued at all: their index is the
-                    # padding sentinel, which is one row past the output, and
-                    # redirecting them to a valid row (the previous
-                    # ``torch.where(..., 0)``) serializes every padded lane of
-                    # every block on one address. ``hl.atomic_add`` has no mask
-                    # parameter, so emit the Triton atomic directly -- it masks
-                    # the address, not just the value.
-                    hl.inline_triton(
-                        _MASKED_ATOMIC_ADD,
-                        args={
-                            "p": output,
-                            "r": store_rows * N,  # element row offset
-                            "n": tile_n.index,
-                            "v": acc.to(out_dtype),
-                            "m": token_mask[:, None],
-                        },
-                        output_like=None,
-                    )
-            elif apply_weights and split_k == 1 and not fuse_moe_sum:
-                # Only the store row is needed here: the down projection always
-                # writes the routed slot's token-order row (both layouts), and no
-                # activation is gathered.
-                store_rows = offs_token
-
-                # Off-rank block inside the actual count: zero its output rows
-                # (Triton's write_zeros_to_output) so a combine that reads every
-                # slot sees defined zeros. Both callers now route compactly
-                # (off-rank slots get no block), so this only fires for a
-                # layout that keeps them; blocks beyond the count are excluded
-                # either way, their rows being padding markers. split_k > 1
-                # pre-zeroes the whole output, and the fused combine skips
-                # this too: an atomic zero-contribution would be a no-op.
-                hl.store(
-                    output,
-                    [store_rows, tile_n],
-                    hl.zeros([tile_m, tile_n], out_dtype),
-                    extra_mask=token_mask[:, None],
-                )
 
     # Exit release: the next kernel may be scheduled as this grid's warps
     # finish. PDL ops must be bare top-level statements, and this kernel serves
@@ -1346,12 +1408,31 @@ def mega_moe_block_mm(
     swap_ab_1 = run.tunable("swap_ab_1", BooleanFragment())
     swap_ab_2 = run.tunable("swap_ab_2", BooleanFragment())
 
+    # 0 selects the packed layout: one block per local expert, no padding (the
+    # GEMM's grid is then exactly the experts and its M loop walks each expert's
+    # routed rows). 0 is not a power of two, so the choices are explicit.
+    # Under EP it is also the default: the aligned layout's grid is sized from
+    # every *dispatched* slot, so only 1/EP of its blocks are ever live (the
+    # packed grid is per local expert instead). Without EP the default stays the
+    # small-batch alignment the heuristic picked before.
+    _align_hi = helion.next_power_of_2(num_tokens)
+    _align_default = (
+        0
+        if global_num_experts > w1.shape[0]
+        else min(helion.next_power_of_2(routed // global_num_experts) * 2, _align_hi)
+    )
+    _align_choices = [
+        0,
+        *(
+            value
+            for value in (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
+            if value <= _align_hi
+        ),
+    ]
     align_block_size = run.tunable(
         "align_block_size",
-        PowerOfTwoFragment(
-            1,
-            helion.next_power_of_2(num_tokens),
-            default_val=helion.next_power_of_2(routed // global_num_experts) * 2,
+        EnumFragment(
+            (_align_default, *(v for v in _align_choices if v != _align_default))
         ),
     )
 
@@ -1445,7 +1526,11 @@ def mega_moe_block_mm(
             fp8_max,
             False,  # scale_ue8m0: hl.dot reads fp32 scales directly
         )
+    # Layout outputs, set by the branch that produces them: the aligned layout
+    # may carry a per-block packed base (`permuted`), the packed layout always
+    # carries the per-expert row offsets, and the dense layout carries neither.
     block_base = None
+    block_offset = None
     num_valid = None
     device = hidden_states.device
     # The unfused act-quant outputs are views of the routing cache (carved here,
@@ -1478,14 +1563,25 @@ def mega_moe_block_mm(
             num_tokens, top_k, w1.shape[0], align_block_size
         )
         sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
-        expert_ids = torch.empty(num_blocks, dtype=torch.int32, device=device)
         num_tokens_post_pad = torch.empty(1, dtype=torch.int32, device=device)
-        # The permuted intermediate needs the packed base row of every block;
-        # leaving it unset skips that store (and its prefix scan).
-        if permuted:
-            # One packed base row per aligned block; a block's lanes are
-            # consecutive rows from there (see `moe_block_mm`).
-            block_base = torch.empty(num_blocks, dtype=torch.int32, device=device)
+        if align_block_size == 0:
+            # Packed: one block per local expert -- the block index is the
+            # expert, so there is no expert_ids -- and `block_offset` gives each
+            # expert's rows (`[e+1] - [e]`) and, when permuted, their base row.
+            expert_ids = None
+            block_offset = torch.empty(
+                w1.shape[0] + 1, dtype=torch.int32, device=device
+            )
+        else:
+            expert_ids = torch.empty(num_blocks, dtype=torch.int32, device=device)
+            block_offset = None
+            # The permuted intermediate needs the packed base row of every
+            # block; leaving it unset skips that store (and its prefix scan).
+            if permuted:
+                # One packed base row per aligned block; a block's lanes are
+                # consecutive rows from there (see `moe_block_mm`).
+                block_base = torch.empty(num_blocks, dtype=torch.int32, device=device)
+        if permuted or align_block_size == 0:
             num_valid = torch.empty(1, dtype=torch.int32, device=device)
         run(
             _MOE_ROUTE_CHILD,
@@ -1499,6 +1595,7 @@ def mega_moe_block_mm(
             global_num_experts,
             w1.shape[0],  # local experts: moe_route keys its config on EP
             block_base,
+            block_offset,
             num_tokens_post_pad,
             num_valid,
         )
@@ -1540,6 +1637,8 @@ def mega_moe_block_mm(
             clamp_limit,
             hq_scale,
             swap_ab_1,
+            block_offset,
+            permuted,
         )
     else:
         gate_up = _resize_cache(big, (num_tokens, top_k, N)).view(routed, N)
@@ -1563,6 +1662,8 @@ def mega_moe_block_mm(
             None,  # clamp_limit: applied before quantizing, not in the GEMM
             None,  # output_scale: no fused epilogue
             swap_ab_1,
+            block_offset,
+            permuted,
         )
 
         # silu_and_mul + per-block fp8 quant, run as a child site so the
@@ -1621,6 +1722,8 @@ def mega_moe_block_mm(
         None,  # clamp_limit: the down projection has no act epilogue
         None,  # output_scale
         swap_ab_2,
+        block_offset,
+        permuted,
     )
 
     # Combine: reduce the weighted routed rows over top_k into the layer

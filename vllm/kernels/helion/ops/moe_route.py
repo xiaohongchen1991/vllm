@@ -93,6 +93,9 @@ def _align_sizes(
     num_tokens: int, top_k: int, E: int, m_block_size: int
 ) -> tuple[int, int]:
     numel = num_tokens * top_k
+    # Packed layout: one block per local expert, rows dense.
+    if m_block_size == 0:
+        return numel, E
     max_padded = numel + E * (m_block_size - 1)
     if numel < E:
         max_padded = min(numel * m_block_size, max_padded)
@@ -116,17 +119,14 @@ def _simulate_topk_ids(num_tokens: int, E: int, top_k: int) -> torch.Tensor:
 def _m_block_size_candidates(num_tokens: int, top_k: int, E: int) -> list[int]:
     """The `m_block_size` values a case is tuned across.
 
-    Endpoints only. `m_block_size` rescales the padded routed-slot count the
-    GEMMs iterate (`num_tokens_post_padded`) without changing the kernel's
-    structure, so a config measured at both ends
-    bounds everything the mega's `align_block_size` tunable can pick, and an
-    interior point would only interpolate between them at a third of the search
-    time. Duplicates collapse; both values are powers of two, like that
-    tunable's fragment.
+    Endpoints only: the aligned end (`next_power_of_2(num_tokens)`) and the
+    packed layout's `0`, whose structure differs (one block per expert, no
+    padding, no block index), so the kernel is tuned and checked on both rather
+    than on an interior alignment that would only interpolate between them. An
+    interior point would cost a third of the search time for no gain.
     """
-    # lo = max(2, helion.next_power_of_2(num_tokens * top_k // E))
     hi = helion.next_power_of_2(num_tokens)
-    return sorted({hi})
+    return sorted({0, hi})
 
 
 def _generate_input(
@@ -146,15 +146,27 @@ def _generate_input(
         m_block_size = max(2, helion.next_power_of_2(num_tokens * top_k // E))
 
     max_padded, num_blocks = _align_sizes(num_tokens, top_k, E, m_block_size)
+    packed = m_block_size == 0
 
     topk_ids = _simulate_topk_ids(num_tokens, E, top_k)
     sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device="cuda")
-    expert_ids = torch.empty(num_blocks, dtype=torch.int32, device="cuda")
+    # Packed: one block per expert, so the block index is the expert and the
+    # per-expert row offsets are the layout.
+    expert_ids = (
+        None if packed else torch.empty(num_blocks, dtype=torch.int32, device="cuda")
+    )
+    block_offset = (
+        torch.empty(num_local_experts + 1, dtype=torch.int32, device="cuda")
+        if packed
+        else None
+    )
 
-    # The packed block rows are the only optional output: without them the
-    # kernel is the routing-only view.
+    # The packed block rows are the only extra aligned-layout output: without
+    # them the kernel is the routing-only view.
     block_base = (
-        torch.empty(num_blocks, dtype=torch.int32, device="cuda") if permuted else None
+        torch.empty(num_blocks, dtype=torch.int32, device="cuda")
+        if permuted and not packed
+        else None
     )
     num_tokens_post_padded = torch.empty(1, dtype=torch.int32, device="cuda")
     num_valid = torch.empty(1, dtype=torch.int32, device="cuda")
@@ -180,6 +192,7 @@ def _generate_input(
         E,
         num_local_experts,
         block_base,
+        block_offset,
         num_tokens_post_padded,
         num_valid,
     )
@@ -301,6 +314,7 @@ def fake_impl(
     num_experts: int,
     num_local_experts: int,
     block_base: torch.Tensor | None = None,
+    block_offset: torch.Tensor | None = None,
     num_tokens_post_padded: torch.Tensor | None = None,
     num_valid: torch.Tensor | None = None,
 ) -> None:
@@ -318,6 +332,7 @@ def baseline(
     num_experts: int,
     num_local_experts: int,
     block_base: torch.Tensor | None = None,
+    block_offset: torch.Tensor | None = None,
     num_tokens_post_padded: torch.Tensor | None = None,
     num_valid: torch.Tensor | None = None,
 ) -> None:
@@ -356,20 +371,38 @@ def baseline(
     order[boundaries[keyed] + rank_in_key] = pos
     experts_sorted = keyed[order]
     counts = (boundaries[1:] - boundaries[:-1]).to(torch.int32)
-    blocks_per_expert = (counts.to(torch.int64) + (m_block_size - 1)) // m_block_size
-    block_offs = torch.cumsum(blocks_per_expert, 0) - blocks_per_expert
-    if num_tokens_post_padded is not None:
-        num_tokens_post_padded.copy_(
-            (blocks_per_expert.sum() * m_block_size).to(torch.int32).reshape(1)
-        )
+    packed = m_block_size == 0
+    if packed:
+        # One block per expert: the packed row is the expert's boundary offset
+        # plus its rank, which is exactly the sorted position (`order`).
+        if num_tokens_post_padded is not None:
+            num_tokens_post_padded.copy_(
+                boundaries[num_experts].to(torch.int32).reshape(1)
+            )
+        if block_offset is not None:
+            # Only this rank's experts own packed rows (the reference keys
+            # off-rank slots past every global expert).
+            block_offset.copy_(boundaries[: num_local_experts + 1].to(torch.int32))
+    else:
+        blocks_per_expert = (
+            counts.to(torch.int64) + (m_block_size - 1)
+        ) // m_block_size
+        block_offs = torch.cumsum(blocks_per_expert, 0) - blocks_per_expert
+        if num_tokens_post_padded is not None:
+            num_tokens_post_padded.copy_(
+                (blocks_per_expert.sum() * m_block_size).to(torch.int32).reshape(1)
+            )
     if num_valid is not None:
         num_valid.copy_(boundaries[num_experts].to(torch.int32).reshape(1))
 
     real = experts_sorted < num_experts
     e_safe = torch.where(real, experts_sorted, 0)
     rank = pos - boundaries[e_safe]
-    blk = block_offs[e_safe] + rank // m_block_size
-    slot = blk * m_block_size + rank % m_block_size
+    if packed:
+        slot = boundaries[e_safe] + rank
+    else:
+        blk = block_offs[e_safe] + rank // m_block_size
+        slot = blk * m_block_size + rank % m_block_size
 
     # Aligned layout: padding marker / -1 tail, then the real blocks/slots.
     # Real rows land through fixed-shape scatters: boolean-mask assignment needs
@@ -392,7 +425,8 @@ def baseline(
         out.copy_(staged[:n])
 
     scatter_masked(sorted_token_ids, slot, order, routed)
-    scatter_masked(expert_ids, blk, experts_sorted, -1)
+    if not packed:
+        scatter_masked(expert_ids, blk, experts_sorted, -1)
 
     if block_base is not None:
         # A block's lanes are one expert's consecutive ranks, so the block's
@@ -421,8 +455,8 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
     assert isinstance(expected, tuple | list)
     a, ref = list(actual), list(expected)
     # sorted(2) expert_ids(3) num_tokens(4) top_k(5) m_block_size(6) E(7)
-    # local_E(8) block_base(9) ntp(10) num_valid(11)
-    for i in (10, 11):
+    # local_E(8) block_base(9) block_offset(10) ntp(11) num_valid(12)
+    for i in (11, 12):
         if a[i] is not None:
             assert torch.equal(a[i], ref[i])
 
@@ -433,8 +467,19 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
     # Only the live blocks are written: the expert_ids -1 tail and the
     # worst-case buffer fill are gone (consumers prune blocks past the count),
     # so everything below compares that prefix.
-    live_blocks = int(a[10]) // m_block_size if a[10] is not None else a[3].numel()
-    assert torch.equal(a[3][:live_blocks], ref[3][:live_blocks])
+    packed = m_block_size == 0
+    if packed:
+        live_blocks = int(a[12])  # every expert is one block; the count is rows
+    else:
+        live_blocks = int(a[11]) // m_block_size if a[11] is not None else a[3].numel()
+    if packed:
+        assert a[3] is None and ref[3] is None
+        offsets = a[10].long()
+        assert offsets.numel() == a[8] + 1
+        assert bool((offsets[1:] >= offsets[:-1]).all())
+        assert int(offsets[-1]) == int(a[12])
+    else:
+        assert torch.equal(a[3][:live_blocks], ref[3][:live_blocks])
     # Padding lanes inside live blocks are the only ones a GEMM may read beyond
     # the real slots, and they must carry the sentinel, not stale memory.
     live = a[2][: live_blocks * m_block_size]
@@ -453,7 +498,28 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
             groups.setdefault(expert, []).extend(block[block < routed].tolist())
         return {expert: sorted(slots) for expert, slots in groups.items()}
 
-    assert slots_by_expert(sa) == slots_by_expert(sr)
+    if not packed:
+        assert slots_by_expert(sa) == slots_by_expert(sr)
+
+    if packed:
+        # Each expert's packed rows are exactly its slots: `sorted_token_ids`
+        # holds slots in expert-major order and the offsets delimit the experts.
+        e = a[0].reshape(-1).to(torch.int64)
+        if a[1] is not None:
+            e = a[1][e.clamp(min=0)].to(torch.int64)
+        valid = (e >= 0) & (a[0].reshape(-1) >= 0)
+        counts = torch.bincount(e[valid], minlength=a[8]).to(torch.int64)
+        expect = torch.cat(
+            [torch.zeros(1, dtype=torch.int64, device=counts.device), counts.cumsum(0)]
+        )
+        assert torch.equal(a[10].long(), expect)
+        for expert in range(a[8]):
+            lo, hi = int(expect[expert]), int(expect[expert + 1])
+            if lo == hi:
+                continue
+            slots = a[2][lo:hi].long()
+            assert bool((slots < routed).all())
+            assert bool((e[slots] == expert).all())
 
     if a[9] is not None and ref[9] is not None:
         # The per-block base row is the map the GEMMs compute their rows from,
@@ -467,8 +533,8 @@ def _baseline_accuracy_check(actual: object, expected: object) -> None:
         expected = base.new_zeros((live_blocks, m_block_size))
         expected[:] = base[:, None] + torch.arange(m_block_size, device=base.device)
         rows = expected[lanes < routed].long()
-        packed = torch.arange(int(a[11]), device=base.device)
-        assert torch.equal(torch.sort(rows).values, packed)
+        valid_rows = torch.arange(int(a[12]), device=base.device)
+        assert torch.equal(torch.sort(rows).values, valid_rows)
         assert bool((counts <= m_block_size).all())
 
 
@@ -501,14 +567,18 @@ def moe_route(
     expert_map: torch.Tensor
     | None,  # [global_num_experts] global -> local, -1 = off-rank
     sorted_token_ids: torch.Tensor,  # [max_padded] int32 (out)
-    expert_ids: torch.Tensor,  # [num_blocks] int32 (out)
+    expert_ids: torch.Tensor | None,  # [num_blocks] int32 (out; None = packed layout)
     num_tokens: int,
     top_k: int,
-    m_block_size: int,
+    # The layout mode: a positive alignment block size, or 0 for one packed
+    # block per expert. Constexpr so the mode selects the traced body.
+    m_block_size: hl.constexpr,
     num_experts: int,  # global expert count (EP=1: the local count)
     num_local_experts: int,  # experts this rank owns; pick_config's EP = E / it
     block_base: torch.Tensor
     | None = None,  # [num_blocks] int32 (out; None = routing-only view)
+    block_offset: torch.Tensor
+    | None = None,  # [E + 1] int32 (out; packed layout: exclusive row offsets)
     num_tokens_post_padded: torch.Tensor
     | None = None,  # [1] int32 (out: padded routed-slot count)
     num_valid: torch.Tensor | None = None,  # [1] int32 (out: on-rank slot count)
@@ -518,20 +588,25 @@ def moe_route(
     hl.specialize(top_k)
     hl.specialize(num_experts)
     hl.specialize(num_local_experts)
-    # The block size follows the GEMM's align_block_size, so it is a small set
-    # of values; specializing it lets the padding tail be sized with an arange
-    # instead of a one-iteration tile loop.
-    hl.specialize(m_block_size)
     hl.specialize(routed)
 
     topk_flat = topk_ids.reshape(-1)
     assert topk_flat.numel() == routed
     assert topk_ids.dtype == torch.int32
-    assert expert_ids.dtype == torch.int32
-    # The layout block size is specialized above; a non-power-of-two value is
-    # still fine (the arange pads to the next power of two and the tail fill
-    # masks the extra lanes).
-    assert m_block_size > 0
+    # `m_block_size == 0` selects the packed layout: one block per local expert,
+    # rows dense from `block_offset[e]`, so no block padding, no expert_ids and
+    # no block-index scan. Otherwise a non-power-of-two block size is still fine
+    # (the arange pads to the next power of two and the tail fill masks the
+    # extra lanes).
+    assert m_block_size >= 0
+    packed = m_block_size == 0
+    if packed:
+        assert block_offset is not None
+        assert expert_ids is None
+        assert block_offset.numel() == num_local_experts + 1
+    else:
+        assert block_offset is None
+        assert expert_ids is not None
     assert expert_map is not None or num_local_experts == num_experts, (
         "without an expert map every expert is local"
     )
@@ -562,11 +637,13 @@ def moe_route(
     )
 
     # The caller sizes the layout buffers worst-case (mega's _align_sizes); the
-    # kernel writes only the live blocks and their padding tails.
+    # kernel writes only the live blocks and their padding tails. Packed, the
+    # layout is dense: `routed` rows, one block per expert.
     max_padded = sorted_token_ids.shape[0]
-    num_blocks = expert_ids.shape[0]
     assert max_padded >= routed
-    assert num_blocks >= (max_padded + m_block_size - 1) // m_block_size
+    if not packed:
+        num_blocks = expert_ids.shape[0]
+        assert num_blocks >= (max_padded + m_block_size - 1) // m_block_size
 
     hl.pdl_wait()
     hl.pdl_launch_dependents()
@@ -594,45 +671,53 @@ def moe_route(
 
     # Pass 2: exclusive per-expert offsets from the census, with four programs
     # (``hl.grid(4)``) each owning one output: the permutation row offsets and
-    # the block offsets (prefix scans), then the padded routed-slot count and
-    # the exact on-rank slot count (totals). Splitting them keeps a program's
-    # work to a single local-experts-wide pass -- the previous forms had one
-    # program issue all four serially, and before that every program re-summed
-    # the whole census, O(E^2) in all.
+    # the block offsets (prefix scans), then the routed-slot count and the
+    # exact on-rank slot count (totals). Splitting them keeps a program's work
+    # to a single local-experts-wide pass -- the previous forms had one program
+    # issue all four serially, and before that every program re-summed the whole
+    # census, O(E^2) in all.
+    # Packed, the row offsets *are* the layout (`block_offset`), there is no
+    # block-index scan (the expert is the block), and the two counts coincide.
     for i in hl.grid(4):
         e_all = hl.arange(num_local_experts)
         counts = hl.load(counts_buf, [e_all], extra_mask=e_all < num_local_experts)
         mask = e_all < num_local_experts
 
-        if i == 0:  # noqa: SIM102 - `and` would truth-test a traced condition
+        if i == 0:
+            row_offsets = hl.cumsum(counts, dim=0) - counts
+            if block_offset is not None:
+                hl.store(block_offset, [e_all], row_offsets, extra_mask=mask)
             if block_base is not None:
+                hl.store(offs_buf, [e_all], row_offsets, extra_mask=mask)
+        if i == 1:  # noqa: SIM102 - `and` would truth-test a traced condition
+            if not packed:
+                blocks_per_expert = (counts + (m_block_size - 1)) // m_block_size
                 hl.store(
-                    offs_buf,
+                    block_offs_buf,
                     [e_all],
-                    hl.cumsum(counts, dim=0) - counts,
+                    hl.cumsum(blocks_per_expert, dim=0) - blocks_per_expert,
                     extra_mask=mask,
                 )
-        if i == 1:
-            blocks_per_expert = (counts + (m_block_size - 1)) // m_block_size
-            hl.store(
-                block_offs_buf,
-                [e_all],
-                hl.cumsum(blocks_per_expert, dim=0) - blocks_per_expert,
-                extra_mask=mask,
-            )
-        if i == 2:
-            blocks_per_expert = (counts + (m_block_size - 1)) // m_block_size
+        if i == 2:  # noqa: SIM102 - `and` would truth-test a traced condition
             if num_tokens_post_padded is not None:
-                total_blocks = blocks_per_expert[None, :].sum(dim=1)
-                hl.store(
-                    num_tokens_post_padded,
-                    [hl.arange(1)],
-                    total_blocks * m_block_size,
-                )
-        if i == 3:  # noqa: SIM102 - `and` would truth-test a traced condition
+                if packed:
+                    # The layout is dense: the count is the on-rank slot count.
+                    total_rows = counts[None, :].sum(dim=1)
+                else:
+                    blocks_per_expert = (counts + (m_block_size - 1)) // m_block_size
+                    total_rows = blocks_per_expert[None, :].sum(dim=1) * m_block_size
+                hl.store(num_tokens_post_padded, [hl.arange(1)], total_rows)
+        if i == 3:
+            total_valid = counts[None, :].sum(dim=1)
             if num_valid is not None:
-                total_valid = counts[None, :].sum(dim=1)
                 hl.store(num_valid, [hl.arange(1)], total_valid)
+            if block_offset is not None:
+                # Exclusive offsets need the end of the last expert.
+                hl.store(
+                    block_offset,
+                    [num_local_experts + hl.arange(1)],
+                    total_valid,
+                )
 
     # Pass 3: place every slot -- gather its expert's block offset and the
     # rank claimed in pass 1, then scatter. No atomics here: every ordering
@@ -653,45 +738,51 @@ def moe_route(
         # so no clamped copy of ``e`` is needed.
         rank = hl.load(ranks_buf, [tile_r])
 
-        block_offs = hl.load(block_offs_buf, [e], extra_mask=valid)
-        blk = block_offs + rank // m_block_size
-        hl.store(
-            sorted_token_ids,
-            [blk * m_block_size + rank % m_block_size],
-            tile_r.index,
-            extra_mask=valid,
-        )
-        hl.store(expert_ids, [blk], e, extra_mask=valid)
-
-        if m_block_size > 1:
-            # Sentinel-fill this expert's padding tail: its slots fill the
-            # blocks in rank order, so the only padding a GEMM can read is
-            # [counts[e], blocks_e * m_block_size), the tail of its last block.
-            # The real slots live below counts[e], so the fill never races them,
-            # and every slot of the expert writes the same lanes idempotently.
-            # This replaces the worst-case fill over the whole padded buffer.
-            # At block size 1 there is no padding, so the tail is skipped.
-            cnt = hl.load(counts_buf, [e], extra_mask=valid)
-            blocks_e = (cnt + m_block_size - 1) // m_block_size
-            pad = blocks_e * m_block_size - cnt
-            base = hl.load(block_offs_buf, [e], extra_mask=valid) * m_block_size
-            pad_cols = hl.arange(m_block_size)
-            tail = base[:, None] + cnt[:, None] + pad_cols[None, :]
+        if packed:
+            # One block per expert, rows dense: the slot lands on its expert's
+            # offset plus its rank. No padding, no block index, no expert_ids.
+            row = hl.load(block_offset, [e], extra_mask=valid) + rank
+            hl.store(sorted_token_ids, [row], tile_r.index, extra_mask=valid)
+        else:
+            block_offs = hl.load(block_offs_buf, [e], extra_mask=valid)
+            blk = block_offs + rank // m_block_size
             hl.store(
                 sorted_token_ids,
-                [tail],
-                (tail * 0 + routed).to(sorted_token_ids.dtype),
-                extra_mask=valid[:, None] & (pad_cols[None, :] < pad[:, None]),
-            )
-        if block_base is not None:
-            row_offs = hl.load(offs_buf, [e], extra_mask=valid)
-            # A block's lanes are one expert's consecutive ranks, so the block's
-            # first lane sits at the expert's row offset plus its block index.
-            # Every slot of the block writes the same value, so the store is
-            # idempotent, like `expert_ids` above.
-            hl.store(
-                block_base,
-                [blk],
-                row_offs + (blk - block_offs) * m_block_size,
+                [blk * m_block_size + rank % m_block_size],
+                tile_r.index,
                 extra_mask=valid,
             )
+            hl.store(expert_ids, [blk], e, extra_mask=valid)
+
+            if m_block_size > 1:
+                # Sentinel-fill this expert's padding tail: its slots fill the
+                # blocks in rank order, so the only padding a GEMM can read is
+                # [counts[e], blocks_e * m_block_size), the tail of its last block.
+                # The real slots live below counts[e], so the fill never races them,
+                # and every slot of the expert writes the same lanes idempotently.
+                # This replaces the worst-case fill over the whole padded buffer.
+                # At block size 1 there is no padding, so the tail is skipped.
+                cnt = hl.load(counts_buf, [e], extra_mask=valid)
+                blocks_e = (cnt + m_block_size - 1) // m_block_size
+                pad = blocks_e * m_block_size - cnt
+                base = hl.load(block_offs_buf, [e], extra_mask=valid) * m_block_size
+                pad_cols = hl.arange(m_block_size)
+                tail = base[:, None] + cnt[:, None] + pad_cols[None, :]
+                hl.store(
+                    sorted_token_ids,
+                    [tail],
+                    (tail * 0 + routed).to(sorted_token_ids.dtype),
+                    extra_mask=valid[:, None] & (pad_cols[None, :] < pad[:, None]),
+                )
+            if block_base is not None:
+                row_offs = hl.load(offs_buf, [e], extra_mask=valid)
+                # A block's lanes are one expert's consecutive ranks, so the block's
+                # first lane sits at the expert's row offset plus its block index.
+                # Every slot of the block writes the same value, so the store is
+                # idempotent, like `expert_ids` above.
+                hl.store(
+                    block_base,
+                    [blk],
+                    row_offs + (blk - block_offs) * m_block_size,
+                    extra_mask=valid,
+                )
