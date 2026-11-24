@@ -17,26 +17,22 @@ the `moe_sum` combine reduces the weighted rows over top_k, so the composite
 models the complete MoE layer end to end, mirroring `TritonExperts.apply`
 (and the custom Triton baseline).
 
-`maybe_permuted`, `fuse_moe_sum` and `m_block_size` are root tunables
-(`run.tunable`). While `num_tokens * top_k / E` is below
-`_MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE`, `maybe_permuted` stays in the
-search space but the effective `permuted` flag is False (gather/scatter) --
-configs are exchanged across shapes, so the tunable must not disappear from
-the schema.
+`permuted`, `fuse_moe_sum` and `m_block_size` are root tunables
+(`run.tunable`) and configs are exchanged across shapes, so a tunable never
+disappears from the schema.
 `m_block_size` is the alignment block size -- the routed rows of one
 aligned block, shared by `moe_align_block_size` and both GEMM sites
 (Triton fused_moe's `BLOCK_SIZE_M`); its default keeps the
 one-block-per-expert-segment layout of `next_power_of_two(num_tokens)`.
-`maybe_permuted=True` (the default) selects the expert-major layout: the
-`moe_route` kernel (called through `run`, so the composite tunes it with
-everything else) produces the aligned layout, the expert-major activation
-rows, and `inv_perm` from one launch (replacing `_align_routing` +
-`moe_permute`), and both GEMM stages gather
-them through `inv_perm`. GEMM1 also stores its gate_up output permuted
-(keeping the intermediate contiguous per expert), while GEMM2 scatters its
-weighted output to the routed slots' token-order rows, so the top-k combine
-is always a contiguous `moe_sum`. The autotuner explores both
-layouts per shape and keeps the faster.
+`permuted=True` (the default) makes the *intermediate* expert-major: the
+gate_up projection (which always reads the caller's token-order activations)
+writes its output to the block's packed rows, and the down projection reads
+it back from there. `moe_route` (called through `run`, so the composite
+tunes it with everything else) produces that per-block packed base row from
+one launch (replacing `_align_routing`), and GEMM2 scatters its weighted
+output to the routed slots' token-order rows, so the top-k combine is always
+a contiguous `moe_sum`. The autotuner explores both layouts per shape and
+keeps the faster.
 `fuse_moe_sum` folds that combine into GEMM2's store instead: each
 weighted routed row atomically accumulates into its token's row of the
 [num_tokens, H] layer output (pre-zeroed by the kernel), replacing the
@@ -129,11 +125,6 @@ logger = init_logger(__name__)
 
 GROUP_K = 128
 GROUP_N = 128
-
-# Below this many routed slots per global expert (num_tokens * top_k / E) the
-# explicit permutation's activation copy plus its extra route phases cannot
-# repay themselves, so the tunable is ignored and ``permuted`` stays False.
-_MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE = 4
 
 
 class _DefaultTrueBooleanFragment(BooleanFragment):
@@ -250,7 +241,7 @@ def _align_sizes(
 )
 def moe_block_mm(
     output: torch.Tensor,  # [routed, N] (out; [num_tokens, N] when fuse_moe_sum)
-    aq: torch.Tensor,  # [M, K] fp8; M = num_tokens or num_tokens * top_k
+    aq: torch.Tensor,  # [M, K] fp8; M = num_tokens (gate_up) or routed rows
     aq_scale: torch.Tensor,  # [M, K // 128]
     w: torch.Tensor,  # [E, N, K] fp8
     w_scale: torch.Tensor,  # [E, N // 128, K // 128]
@@ -262,7 +253,7 @@ def moe_block_mm(
     split_k: hl.constexpr,
     num_tokens_post_padded: torch.Tensor,  # [1] int32: padded routed-slot count
     topk_weights: torch.Tensor | None = None,  # [num_tokens, top_k] routed weights
-    inv_perm: torch.Tensor | None = None,  # [routed] slot -> permuted row
+    block_base: torch.Tensor | None = None,  # [num_blocks] packed row of block b
     fuse_moe_sum: hl.constexpr = False,  # accumulate into the [num_tokens, N] output
     clamp_limit: hl.constexpr | None = None,  # silu/up clamp of the fused epilogue
     output_scale: torch.Tensor | None = None,  # [routed, N // 2 // 128] fp32 (out)
@@ -317,17 +308,18 @@ def moe_block_mm(
     assert num_tokens >= 1
     assert top_k >= 1
 
-    # permuted mode (inv_perm is not None): aq/aq_scale hold moe_permute's
-    # expert-major rows (one row per routed slot, no padding), gathered
-    # through inv_perm (routed slot -> permuted row). The gate_up projection
-    # (topk_weights is None) also stores through inv_perm, keeping the
-    # intermediate permuted so downstream stages read contiguous per-expert
-    # segments; the down projection scatters its weighted output to the routed
-    # slots' token-order rows, so the combine is a contiguous moe_sum.
-    if inv_perm is not None:
-        assert slots_per_row == 1
-        assert inv_perm.ndim == 1
-        assert inv_perm.numel() == routed
+    # Permuted intermediate (block_base is not None): the gate_up projection
+    # (topk_weights is None) writes its output to the block's packed rows and
+    # the down projection reads them back. A block's lanes are one expert's
+    # consecutive ranks, so lane i of block b is row `block_base[b] + i` -- no
+    # per-slot map. The activations the gate_up reads stay the caller's
+    # token-order rows, and the down projection scatters its weighted output to
+    # the routed slots' token-order rows, so the combine is a contiguous
+    # moe_sum.
+    if block_base is not None:
+        assert block_base.ndim == 1
+        # One base row per aligned block, the grid the down projection prunes.
+        assert block_base.numel() == expert_ids.size(0)
 
     # Optional routed weights (the MoE combine coefficients), one value per
     # routed slot, applied per output row in the epilogue like Triton's
@@ -479,21 +471,22 @@ def moe_block_mm(
                 token_mask = row_mask & (offs_token < routed)
 
             if e >= 0:
-                # The permuted / unpermuted split keys on inv_perm's presence:
-                # None checks resolve at trace time, so only the taken layout is
+                # The permuted split keys on block_base's presence: None
+                # checks resolve at trace time, so only the taken layout is
                 # traced and the compiled code has no branch on the mode at all.
-                if inv_perm is not None:
-                    # aq is in moe_permute's expert-major order: permuted row
-                    # inv_perm[s] holds routed slot s, so the activation gather
-                    # goes through inv_perm (masked lanes load 0). The gate_up
-                    # projection stores permuted as well (contiguous per expert);
-                    # the down projection lands on the routed slot's token-order
-                    # row so the combine is a contiguous moe_sum.
-                    # Padded lanes hold the sorted-ids sentinel (one past the
-                    # table); the load is masked, so the index is never used.
-                    inv_rows = hl.load(inv_perm, [offs_token], extra_mask=token_mask)
-                    aq_rows = inv_rows
-                    store_rows = offs_token if apply_weights else inv_rows
+                if block_base is not None:
+                    # The intermediate lives on the block's packed rows: lane i
+                    # of block b is row `block_base[b] + i`. The gate_up reads
+                    # the caller's token-order activations and writes there; the
+                    # down projection reads there and lands on the routed slot's
+                    # token-order row, so the combine stays a contiguous
+                    # moe_sum. Padded lanes are masked by the sorted-ids
+                    # sentinel, so their out-of-range row is never dereferenced.
+                    permuted_rows = block_base[blk] + tile_m.index
+                    aq_rows = (
+                        permuted_rows if apply_weights else offs_token // slots_per_row
+                    )
+                    store_rows = offs_token if apply_weights else permuted_rows
                 else:
                     # Routed slot offs_token reads activation row offs_token //
                     # slots_per_row (the token's row for the per-token gate_up
@@ -1343,20 +1336,15 @@ def mega_moe_block_mm(
     H = w2.shape[1]
     routed = num_tokens * top_k
 
-    # ``maybe_permuted`` selects the expert-major layout. The explicit
-    # permutation pays an activation copy plus extra route phases; below the
-    # threshold it cannot repay them, so the tunable is ignored and the
-    # effective ``permuted`` flag stays False. Keep the tunable registered --
-    # configs are shared across shapes -- and derive the decision.
-    maybe_permuted = run.tunable("maybe_permuted", _DefaultTrueBooleanFragment())
+    # ``permuted`` keeps the intermediate expert-major: GEMM1 writes its output
+    # to the block's packed rows and GEMM2 reads it back from there. Nothing is
+    # permuted on the routing side -- GEMM1 always reads the caller's
+    # token-order activations.
+    permuted = run.tunable("permuted", _DefaultTrueBooleanFragment())
     # Each GEMM site's operand order; the child takes it as a constexpr input so
     # only the selected orientation is traced.
     swap_ab_1 = run.tunable("swap_ab_1", BooleanFragment())
     swap_ab_2 = run.tunable("swap_ab_2", BooleanFragment())
-    permuted = (
-        maybe_permuted
-        and routed >= _MIN_SLOTS_PER_EXPERT_TO_TUNE_PERMUTE * global_num_experts
-    )
 
     align_block_size = run.tunable(
         "align_block_size",
@@ -1393,15 +1381,15 @@ def mega_moe_block_mm(
     fused_act_quant = fuse_act_quant and split_k_1 == 1
 
     # Both modes route through the moe_route kernel as a child site (``run``),
-    # so its config is tuned with the composite's other sites. Permuted, one
-    # fused launch produces the aligned layout (sorted_token_ids / expert_ids),
-    # the expert-major permuted activations and scales, inv_perm, and the
-    # padded routed-slot count -- replacing align + moe_permute; both GEMM
-    # stages then gather through inv_perm (GEMM1 also stores permuted, keeping
-    # the intermediate contiguous per expert, while GEMM2 scatters its weighted
-    # output to the routed slots' token-order rows, so the combine is always a
-    # contiguous moe_sum). With ``permuted=False``, the same kernel runs
-    # without a permutation source, yielding just the aligned layout. The one
+    # so its config is tuned with the composite's other sites. One fused launch
+    # produces the aligned layout (sorted_token_ids / expert_ids) and the padded
+    # routed-slot count -- replacing ``_align_routing`` -- plus, when
+    # ``permuted``, the per-block packed base row (``block_base``) that both
+    # GEMM stages address the expert-major *intermediate* through: GEMM1 writes
+    # there (keeping it contiguous per expert) and GEMM2 reads it back there,
+    # while GEMM2 scatters its weighted output to the routed slots' token-order
+    # rows so the combine is always a contiguous moe_sum. The activations GEMM1
+    # reads are the caller's token-order rows in both modes. The one
     # shortcut left is the dense layout at align_block_size == 1 with no
     # expert_map, where every routed slot is its own block and no routing
     # kernel is needed.
@@ -1417,29 +1405,26 @@ def mega_moe_block_mm(
     # Workspace roles: ``big`` is the cache whose row is wide enough for
     # max(N, H), so it hosts GEMM1's gate_up and then GEMM2's staged output
     # (gate_up is dead once the act-quant consumed it). ``small`` hosts the
-    # routing scratch -- the internally quantized activations or the permuted
-    # copies -- and then the act-quant's outputs, all of which are dead before
-    # the next one is written. Every allocation in this body is therefore a view
-    # of a caller-owned cache.
+    # routing scratch -- the internally quantized activations -- and then the
+    # act-quant's outputs, all of which are dead before the next one is written.
+    # Every allocation in this body is therefore a view of a caller-owned cache.
     if fused_act_quant:
         # GEMM1 writes the act-quant outputs itself, so it is the one that needs
         # two free caches: hq rides workspace2, GEMM2 stages into workspace13
         # (the historical layout), and the routing scratch has no cache left --
         # it is allocated up front instead.
         big, small = workspace13, workspace2
-        route_cache = perm_cache = None
+        route_cache = None
     else:
         big, small = (workspace2, workspace13) if N >= H else (workspace13, workspace2)
-        route_cache = big if permuted else small
-        perm_cache = small
+        route_cache = small
     if hidden_states.dtype == current_platform.fp8_dtype():
         assert a1q_scale is not None
         aq, aq_scale = hidden_states, a1q_scale
     else:
         assert a1q_scale is None
-        # One row per token, like the fp8-input path: routing copies a slot's
-        # source row as ``source_aq[slot // top_k]``, so ``aq`` is token-indexed
-        # until the permutation widens it to one row per routed slot.
+        # One row per token, like the fp8-input path: the gate_up projection
+        # reads a routed slot's activation row as ``aq[slot // top_k]``.
         aq, aq_scale = _stage_pair(
             route_cache,
             hidden_states.device,
@@ -1460,7 +1445,7 @@ def mega_moe_block_mm(
             fp8_max,
             False,  # scale_ue8m0: hl.dot reads fp32 scales directly
         )
-    inv_perm = None
+    block_base = None
     num_valid = None
     device = hidden_states.device
     # The unfused act-quant outputs are views of the routing cache (carved here,
@@ -1495,23 +1480,12 @@ def mega_moe_block_mm(
         sorted_token_ids = torch.empty(max_padded, dtype=torch.int32, device=device)
         expert_ids = torch.empty(num_blocks, dtype=torch.int32, device=device)
         num_tokens_post_pad = torch.empty(1, dtype=torch.int32, device=device)
-        # The child's inputs differ only by the permutation: without a source
-        # there is nothing to permute, and leaving ``num_valid`` unset skips a
-        # store the routing-only path does not consume.
-        if not permuted:
-            source_aq = source_scale = None
-            permuted_aq = permuted_scale = None
-        else:
-            source_aq, source_scale = aq, aq_scale
-            permuted_aq, permuted_scale = _stage_pair(
-                perm_cache,
-                device,
-                routed * aq.shape[1],
-                aq.dtype,
-                (routed, aq.shape[1]),
-                (routed, aq_scale.shape[1]),
-            )
-            inv_perm = torch.empty(routed, dtype=torch.int32, device=device)
+        # The permuted intermediate needs the packed base row of every block;
+        # leaving it unset skips that store (and its prefix scan).
+        if permuted:
+            # One packed base row per aligned block; a block's lanes are
+            # consecutive rows from there (see `moe_block_mm`).
+            block_base = torch.empty(num_blocks, dtype=torch.int32, device=device)
             num_valid = torch.empty(1, dtype=torch.int32, device=device)
         run(
             _MOE_ROUTE_CHILD,
@@ -1524,16 +1498,10 @@ def mega_moe_block_mm(
             align_block_size,
             global_num_experts,
             w1.shape[0],  # local experts: moe_route keys its config on EP
-            source_aq,
-            source_scale,
-            permuted_aq,
-            permuted_scale,
-            inv_perm,
+            block_base,
             num_tokens_post_pad,
             num_valid,
         )
-        if permuted:
-            aq, aq_scale = permuted_aq, permuted_scale
 
     # GEMM1: gate_up projection, staged in workspace2 like the Triton baseline
     # (TritonExperts' intermediate_cache1). The fused epilogue writes fp8
@@ -1567,7 +1535,7 @@ def mega_moe_block_mm(
             split_k_1,
             num_tokens_post_pad,
             None,
-            inv_perm,
+            block_base,
             False,  # fuse_moe_sum: the gate_up projection never combines
             clamp_limit,
             hq_scale,
@@ -1590,7 +1558,7 @@ def mega_moe_block_mm(
             split_k_1,
             num_tokens_post_pad,
             None,
-            inv_perm,
+            block_base,
             False,  # fuse_moe_sum: the gate_up projection never combines
             None,  # clamp_limit: applied before quantizing, not in the GEMM
             None,  # output_scale: no fused epilogue
@@ -1648,7 +1616,7 @@ def mega_moe_block_mm(
         split_k_2,
         num_tokens_post_pad,
         topk_weights,
-        inv_perm,
+        block_base,
         fuse_moe_sum,
         None,  # clamp_limit: the down projection has no act epilogue
         None,  # output_scale
